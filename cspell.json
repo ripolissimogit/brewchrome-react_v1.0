@@ -1,0 +1,22 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "brewchrome",
+    "vercel",
+    "vite",
+    "vitest",
+    "jsdom",
+    "tailwindcss",
+    "lucide",
+    "dropzone",
+    "jszip",
+    "colorthief",
+    "rgba",
+    "rgb",
+    "hex",
+    "palette",
+    "palettes"
+  ],
+  "ignorePaths": ["node_modules/**", "dist/**", "*.lock", "*.log"]
+}
