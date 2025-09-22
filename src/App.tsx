@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
 import { Palette } from 'lucide-react';
 import { Card } from '@/components/ui/card';
-import ImageUploader from './components/ImageUploader';
-import Gallery from './components/Gallery';
-import Modal from './components/Modal';
-import LoadingSpinner from './components/LoadingSpinner';
-import ErrorMessage from './components/ErrorMessage';
+import { ImageUploader } from './components/ImageUploader';
+import { Gallery } from './components/Gallery';
+import { Modal } from './components/Modal';
+import { LoadingSpinner } from './components/LoadingSpinner';
+import { ErrorMessage } from './components/ErrorMessage';
 import { api } from './services/api';
 import { logger } from './services/logger';
 import type { ProcessedImage } from './types';
@@ -30,12 +30,14 @@ function App() {
         files.map(async (file) => {
           const result = await api.processImage(file);
           return {
-            id: Date.now() + Math.random(),
-            name: file.name,
-            palette: result.palette,
-            socialImage: result.social_image,
-            originalFile: file,
-          };
+            id: `${Date.now()}-${Math.random()}`,
+            filename: file.name,
+            size: file.size,
+            extension: file.name.split('.').pop() || '',
+            tab: 'files' as const,
+            palette: result.palette || [],
+            socialImage: result.social_image || '',
+          } as ProcessedImage;
         })
       );
 
@@ -46,6 +48,10 @@ function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSingleFile = (file: File) => {
+    handleFileUpload([file]);
   };
 
   return (
@@ -63,7 +69,7 @@ function App() {
 
         <main className="space-y-8">
           <Card className="p-6">
-            <ImageUploader onUpload={handleFileUpload} disabled={loading} />
+            <ImageUploader onFileSelect={handleSingleFile} isLoading={loading} />
           </Card>
 
           {loading && <LoadingSpinner />}
@@ -73,7 +79,9 @@ function App() {
             <Card className="p-6">
               <Gallery
                 images={images}
-                onImageClick={(index) => setModalIndex(index)}
+                onImageClick={(index: number) => setModalIndex(index)}
+                onDownloadAll={() => {}}
+                onClearAll={() => setImages([])}
               />
             </Card>
           )}
@@ -81,10 +89,13 @@ function App() {
 
         {modalIndex !== null && (
           <Modal
-            image={images[modalIndex]}
+            isOpen={true}
+            images={images}
+            currentIndex={modalIndex}
             onClose={() => setModalIndex(null)}
             onNext={() => setModalIndex((modalIndex + 1) % images.length)}
-            onPrev={() => setModalIndex((modalIndex - 1 + images.length) % images.length)}
+            onPrevious={() => setModalIndex((modalIndex - 1 + images.length) % images.length)}
+            onDownload={() => {}}
           />
         )}
       </div>
