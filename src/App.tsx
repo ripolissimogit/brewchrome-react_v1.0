@@ -51,7 +51,64 @@ function App() {
   };
 
   const handleSingleFile = (file: File) => {
-    handleFileUpload([file]);
+    // Validate file type - allow images and ZIP files
+    const isImage = file.type.startsWith('image/');
+    const isZip = file.type === 'application/zip' || file.name.toLowerCase().endsWith('.zip');
+    
+    if (!isImage && !isZip) {
+      setError(`Invalid file type: ${file.name}. Please upload an image or ZIP file.`);
+      logger.warn('Invalid file type uploaded', { 
+        fileName: file.name, 
+        fileType: file.type 
+      });
+      return;
+    }
+
+    // Validate file size (max 10MB)
+    if (file.size > 10 * 1024 * 1024) {
+      setError(`File too large: ${file.name}. Maximum size is 10MB.`);
+      logger.warn('File too large', { 
+        fileName: file.name, 
+        fileSize: file.size 
+      });
+      return;
+    }
+
+    if (isZip) {
+      handleZipUpload(file);
+    } else {
+      handleFileUpload([file]);
+    }
+  };
+
+  const handleZipUpload = async (file: File) => {
+    setLoading(true);
+    setError(null);
+
+    try {
+      const result = await api.processZip(file);
+      if (result.success) {
+        // For ZIP files, create a single processed image entry
+        const processedImage = {
+          id: `${Date.now()}-zip`,
+          filename: file.name,
+          size: file.size,
+          extension: 'zip',
+          tab: 'archive' as const,
+          palette: result.palette || [],
+          socialImage: result.social_image || '',
+        };
+        setImages((prev) => [...prev, processedImage]);
+      } else {
+        throw new Error(result.error || 'ZIP processing failed');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'ZIP upload failed';
+      setError(message);
+      logger.error('ZIP upload failed', { error: message });
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
