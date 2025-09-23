@@ -17,6 +17,8 @@ import uuid
 import time
 import json
 import threading
+import hashlib
+import hmac
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
@@ -128,7 +130,7 @@ def _after(resp):
     return resp
 
 # Initialize core engine
-def create_job(job_type: str, data: dict, callback_url: str = None, ttl_h: int = 24) -> str:
+def create_job(job_type: str, data: dict, callback_url: str = None, ttl_h: int = 24, idempotency_key: str = None) -> str:
     """Create new async job"""
     job_id = f"job_{uuid.uuid4().hex[:8]}"
     
@@ -146,7 +148,8 @@ def create_job(job_type: str, data: dict, callback_url: str = None, ttl_h: int =
             "ttl_h": min(ttl_h, 168),  # Max 7 days
             "results": None,
             "error": None,
-            "request_id": getattr(g, "request_id", uuid.uuid4().hex[:8])
+            "request_id": getattr(g, "request_id", uuid.uuid4().hex[:8]),
+            "idempotency_key": idempotency_key
         }
     
     # Submit to worker
@@ -244,17 +247,19 @@ def process_job(job_id: str):
             send_callback(job["callback_url"], job_id, "failed")
 
 def send_callback(callback_url: str, job_id: str, status: str):
-    """Send callback notification"""
+    """Send callback notification with HMAC signature"""
     try:
         with JOB_LOCK:
             job = JOBS.get(job_id, {})
             
+        timestamp = int(time.time())
         payload = {
             "job_id": job_id,
             "status": status,
             "request_id": job.get("request_id"),
             "created_at": int(job.get("created_at", 0)),
-            "finished_at": int(job.get("finished_at", 0)) if job.get("finished_at") else None
+            "finished_at": int(job.get("finished_at", 0)) if job.get("finished_at") else None,
+            "timestamp": timestamp
         }
         
         if status == "completed":
@@ -263,9 +268,31 @@ def send_callback(callback_url: str, job_id: str, status: str):
                 payload["download_url"] = job["download_url"]
         elif status == "failed":
             payload["error"] = job.get("error", {})
-            
-        requests.post(callback_url, json=payload, timeout=10)
         
+        # Create HMAC signature
+        webhook_secret = os.environ.get("WEBHOOK_SECRET", "brewchrome-default-secret")
+        payload_json = json.dumps(payload, sort_keys=True)
+        signature = hmac.new(
+            webhook_secret.encode(),
+            payload_json.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        headers = {
+            "Content-Type": "application/json",
+            "X-Signature": f"sha256={signature}",
+            "X-Timestamp": str(timestamp),
+            "X-Authed": "true",
+            "User-Agent": "BrewChrome-Webhook/1.0"
+        }
+        
+        response = requests.post(callback_url, json=payload, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            logger.info("Webhook delivered", job_id=job_id, callback_url=callback_url, status=status)
+        else:
+            logger.warn("Webhook failed", job_id=job_id, callback_url=callback_url, status_code=response.status_code)
+            
     except Exception as e:
         logger.error("Callback failed", job_id=job_id, callback_url=callback_url, error=str(e))
 
@@ -610,6 +637,20 @@ def process_zip_endpoint():
 def create_job_endpoint():
     """Create async job for batch processing"""
     try:
+        # Check for idempotency key
+        idempotency_key = request.headers.get('Idempotency-Key')
+        if idempotency_key:
+            # Check if job already exists with this key
+            with JOB_LOCK:
+                for job in JOBS.values():
+                    if job.get("idempotency_key") == idempotency_key:
+                        return jsonify({
+                            "job_id": job["id"],
+                            "status": job["status"],
+                            "eta_s": 60,  # Default ETA for existing job
+                            "request_id": job["request_id"]
+                        }), 202
+        
         callback_url = None
         ttl_h = 24
         
@@ -635,7 +676,7 @@ def create_job_endpoint():
             callback_url = request.form.get('callback_url')
             ttl_h = int(request.form.get('ttl_h', 24))
             
-            job_id = create_job("zip_batch", {"zip_data": zip_data}, callback_url, ttl_h)
+            job_id = create_job("zip_batch", {"zip_data": zip_data}, callback_url, ttl_h, idempotency_key)
             
         else:
             # Handle JSON
@@ -652,12 +693,12 @@ def create_job_endpoint():
                 if not isinstance(urls, list) or len(urls) == 0:
                     return make_error(400, "INVALID_INPUT", "URLs must be non-empty array")
                 
-                job_id = create_job("url_batch", {"urls": urls}, callback_url, ttl_h)
+                job_id = create_job("url_batch", {"urls": urls}, callback_url, ttl_h, idempotency_key)
                 
             elif 'zip' in data:
                 # ZIP data
                 zip_data = data['zip']
-                job_id = create_job("zip_batch", {"zip_data": zip_data}, callback_url, ttl_h)
+                job_id = create_job("zip_batch", {"zip_data": zip_data}, callback_url, ttl_h, idempotency_key)
                 
             else:
                 return make_error(400, "INVALID_INPUT", "Provide 'urls' array or 'zip' data")
@@ -697,6 +738,7 @@ def get_job_status(job_id: str):
             return make_error(410, "JOB_EXPIRED", "Job results expired")
         
         response = {
+            "job_id": job_id,
             "status": job["status"],
             "request_id": job["request_id"],
             "created_at": int(job["created_at"]),
@@ -713,13 +755,35 @@ def get_job_status(job_id: str):
             
         elif job["status"] == "completed":
             response["results"] = job["results"]
+            response["results_count"] = len(job["results"])
             if job.get("download_url"):
                 response["download_url"] = job["download_url"]
+                response["download_expires_at"] = int(time.time() + 3600)  # 1 hour
             
         elif job["status"] == "failed":
             response.update(job["error"])
+            response["user_message"] = f"Elaborazione fallita: {job['error'].get('message', 'Errore sconosciuto')}"
         
-        return jsonify(response)
+        # Create response with headers
+        resp = jsonify(response)
+        
+        # ETag for caching
+        import hashlib
+        etag = hashlib.md5(json.dumps(response, sort_keys=True).encode()).hexdigest()[:8]
+        resp.headers['ETag'] = f'"{etag}"'
+        resp.headers['Cache-Control'] = 'no-store'
+        
+        # Retry-After hint based on status
+        if job["status"] == "queued":
+            resp.headers['Retry-After'] = '2'  # 2 seconds for queued
+        elif job["status"] == "processing":
+            resp.headers['Retry-After'] = '5'  # 5 seconds for processing
+        
+        # Check If-None-Match for 304
+        if request.headers.get('If-None-Match') == f'"{etag}"':
+            return '', 304
+            
+        return resp
         
     except Exception as e:
         return make_error(500, "INTERNAL_ERROR", "Failed to get job status")

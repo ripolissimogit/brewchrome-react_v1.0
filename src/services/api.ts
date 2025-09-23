@@ -246,18 +246,30 @@ export const api = {
     }
   },
 
-  async getJobStatus(jobId: string): Promise<{ status: string; progress?: number; results?: any[]; error_code?: string; message?: string; request_id: string }> {
+  async getJobStatus(jobId: string, etag?: string): Promise<{ status: string; progress?: number; results?: any[]; error_code?: string; message?: string; request_id: string }> {
     const requestId = generateRequestId();
     
     try {
       logger.debug('API Call: get job status', { job_id: jobId, request_id: requestId });
 
+      const headers: Record<string, string> = {
+        'X-Request-Id': requestId,
+      };
+      
+      if (etag) {
+        headers['If-None-Match'] = etag;
+      }
+
       const response = await fetch(`${API_BASE}/jobs/${jobId}`, {
         method: 'GET',
-        headers: {
-          'X-Request-Id': requestId,
-        },
+        headers,
       });
+
+      // Handle 304 Not Modified
+      if (response.status === 304) {
+        logger.debug('Job status unchanged (304)', { job_id: jobId });
+        throw new Error('NOT_MODIFIED');
+      }
 
       const data = await response.json();
 
@@ -280,8 +292,17 @@ export const api = {
         request_id: requestId 
       });
 
+      // Store ETag for next request
+      const newEtag = response.headers.get('ETag');
+      if (newEtag) {
+        (data as any)._etag = newEtag;
+      }
+
       return data;
     } catch (error) {
+      if (error instanceof Error && error.message === 'NOT_MODIFIED') {
+        throw error;
+      }
       logger.apiError(`/jobs/${jobId}`, error);
       throw error;
     }
@@ -307,10 +328,14 @@ export const api = {
 
     const startTime = Date.now();
     let currentDelay = startDelayMs;
+    let lastEtag: string | undefined;
 
     while (Date.now() - startTime < maxTimeMs) {
       try {
-        const status = await this.getJobStatus(jobId);
+        const status = await this.getJobStatus(jobId, lastEtag);
+        
+        // Store ETag for next request
+        lastEtag = (status as any)._etag;
         
         if (onProgress) {
           onProgress(status.status, status.progress);
@@ -320,15 +345,33 @@ export const api = {
           return status;
         }
 
-        // Wait before next poll
-        await new Promise(resolve => setTimeout(resolve, currentDelay));
+        // Use server's Retry-After hint if available, otherwise use backoff
+        let nextDelay = currentDelay;
+        // Note: Retry-After would be available in response headers, but fetch API doesn't expose it easily
+        // For now, we'll use the backoff strategy
+        
+        // Wait before next poll with jitter
+        const jitter = 0.8 + Math.random() * 0.5; // 0.8 to 1.3
+        const delayWithJitter = Math.min(nextDelay * jitter, maxDelayMs);
+        await new Promise(resolve => setTimeout(resolve, delayWithJitter));
         currentDelay = Math.min(currentDelay * factor, maxDelayMs);
 
       } catch (error) {
+        // Handle 304 Not Modified - don't treat as error, just continue polling
+        if (error instanceof Error && error.message === 'NOT_MODIFIED') {
+          const jitter = 0.8 + Math.random() * 0.5;
+          const delayWithJitter = Math.min(currentDelay * jitter, maxDelayMs);
+          await new Promise(resolve => setTimeout(resolve, delayWithJitter));
+          currentDelay = Math.min(currentDelay * factor, maxDelayMs);
+          continue;
+        }
+        
         logger.warn('Job polling failed, retrying...', { job_id: jobId, error: error instanceof Error ? error.message : 'Unknown error' });
         
         // Wait before retry on error
-        await new Promise(resolve => setTimeout(resolve, currentDelay));
+        const jitter = 0.8 + Math.random() * 0.5;
+        const delayWithJitter = Math.min(currentDelay * jitter, maxDelayMs);
+        await new Promise(resolve => setTimeout(resolve, delayWithJitter));
         currentDelay = Math.min(currentDelay * factor, maxDelayMs);
       }
     }
