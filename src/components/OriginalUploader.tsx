@@ -43,12 +43,12 @@ export const OriginalUploader: React.FC<OriginalUploaderProps> = ({
     } : activeTab === 'archive' ? {
       'application/zip': ['.zip'],
     } : {},
-    multiple: false,
+    multiple: activeTab === 'files', // Allow multiple files only for 'files' tab
     disabled: isLoading,
   });
 
   const getUploadText = () => {
-    if (activeTab === 'files') return 'choose files';
+    if (activeTab === 'files') return 'choose files or drag & drop multiple images';
     if (activeTab === 'urls') return 'enter URL';
     if (activeTab === 'archive') return 'choose archive';
     return 'choose files';
