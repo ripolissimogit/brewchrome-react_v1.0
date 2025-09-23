@@ -27,6 +27,26 @@ export const api = {
     }
   },
 
+  async ready(): Promise<{ ready: boolean; dependencies: Record<string, boolean> }> {
+    try {
+      logger.debug('API Call: readiness check');
+      const response = await fetch(`${API_BASE}/ready`);
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        logger.warn('Readiness check failed', { status: response.status, data });
+      } else {
+        logger.info('API Success: readiness check', { ready: data.ready });
+      }
+      
+      return data;
+    } catch (error) {
+      logger.apiError('/ready', error);
+      throw error;
+    }
+  },
+
   async processImage(file: File): Promise<PaletteResponse> {
     try {
       logger.fileProcessing('start', file.name, {

@@ -10,6 +10,9 @@ import zipfile
 import requests
 import socket
 import ipaddress
+import shutil
+import psutil
+import importlib
 from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify
@@ -278,6 +281,38 @@ def health_check():
         "version": "1.0.0",
         "features": ["colorthief", "zip_processing", "react_optimized"],
     })
+
+@app.route("/ready", methods=["GET"])
+def ready():
+    """Readiness check endpoint - verifies service is ready for traffic"""
+    deps = {}
+
+    # Controllo disco temporaneo
+    try:
+        disk_ok = shutil.disk_usage("/tmp").free > 1 * 1024 * 1024 * 1024  # >1GB
+        deps["disk"] = disk_ok
+    except Exception:
+        deps["disk"] = False
+
+    # Controllo memoria disponibile
+    try:
+        mem_ok = psutil.virtual_memory().available > 100 * 1024 * 1024  # >100MB
+        deps["mem"] = mem_ok
+    except Exception:
+        deps["mem"] = False
+
+    # Controllo librerie Python
+    for lib in ["colorthief", "smartcrop"]:
+        try:
+            importlib.import_module(lib)
+            deps[lib] = True
+        except ImportError:
+            deps[lib] = False
+
+    ready = all(deps.values())
+    status_code = 200 if ready else 503
+
+    return jsonify({"ready": ready, "dependencies": deps}), status_code
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
