@@ -16,8 +16,10 @@ import importlib
 import uuid
 import time
 import json
+import threading
 from datetime import datetime, timezone
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, request, jsonify, g
 import structlog
@@ -49,6 +51,13 @@ REQUESTS_TOTAL = Counter("requests_total", "HTTP requests total", ["endpoint", "
 REQUEST_DURATION = Histogram("request_duration_ms", "Request duration in ms", ["endpoint"], buckets=[50,100,200,500,1000,2000,5000,10000])
 IMAGES_PROCESSED_TOTAL = Counter("images_processed_total", "Total images processed", ["endpoint"])
 ERRORS_TOTAL = Counter("errors_total", "Errors total", ["endpoint", "error_code"])
+JOBS_TOTAL = Counter("jobs_total", "Total jobs created", ["type"])
+JOBS_COMPLETED = Counter("jobs_completed_total", "Total jobs completed", ["status"])
+
+# Job storage and worker
+JOBS = {}  # In-memory job storage
+JOB_LOCK = threading.Lock()
+EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="job-worker")
 
 app = Flask(__name__)
 CORS(app)
@@ -119,6 +128,155 @@ def _after(resp):
     return resp
 
 # Initialize core engine
+def create_job(job_type: str, data: dict, callback_url: str = None, ttl_h: int = 24) -> str:
+    """Create new async job"""
+    job_id = f"job_{uuid.uuid4().hex[:8]}"
+    
+    with JOB_LOCK:
+        JOBS[job_id] = {
+            "id": job_id,
+            "type": job_type,
+            "status": "queued",
+            "progress": 0,
+            "data": data,
+            "callback_url": callback_url,
+            "created_at": time.time(),
+            "ttl_h": min(ttl_h, 168),  # Max 7 days
+            "results": None,
+            "error": None,
+            "request_id": getattr(g, "request_id", uuid.uuid4().hex[:8])
+        }
+    
+    # Submit to worker
+    EXECUTOR.submit(process_job, job_id)
+    JOBS_TOTAL.labels(type=job_type).inc()
+    
+    return job_id
+
+def process_job(job_id: str):
+    """Process job in background thread"""
+    try:
+        with JOB_LOCK:
+            if job_id not in JOBS:
+                return
+            job = JOBS[job_id]
+            job["status"] = "processing"
+        
+        job_type = job["type"]
+        data = job["data"]
+        results = []
+        
+        if job_type == "zip_batch":
+            # Process ZIP file
+            zip_data = data["zip_data"]
+            result = process_zip_file(zip_data)
+            
+            if result.get("success"):
+                results = result.get("results", [])
+                # Update progress incrementally
+                for i, _ in enumerate(results):
+                    with JOB_LOCK:
+                        JOBS[job_id]["progress"] = int((i + 1) / len(results) * 100)
+                    time.sleep(0.1)  # Simulate processing time
+            else:
+                raise Exception(result.get("error", "ZIP processing failed"))
+                
+        elif job_type == "url_batch":
+            # Process multiple URLs
+            urls = data["urls"]
+            for i, url in enumerate(urls):
+                try:
+                    # Fetch and process URL
+                    fetch_result = fetch_url_internal(url)
+                    if fetch_result.get("success"):
+                        process_result = process_image(fetch_result["image"])
+                        if process_result.get("success"):
+                            results.append({
+                                "filename": url.split("/")[-1] or f"url_{i+1}",
+                                "palette": process_result["palette"],
+                                "social_image": process_result["social_image"]
+                            })
+                except Exception as e:
+                    logger.error("URL processing failed in job", job_id=job_id, url=url, error=str(e))
+                
+                # Update progress
+                with JOB_LOCK:
+                    JOBS[job_id]["progress"] = int((i + 1) / len(urls) * 100)
+        
+        # Job completed successfully
+        with JOB_LOCK:
+            JOBS[job_id]["status"] = "completed"
+            JOBS[job_id]["progress"] = 100
+            JOBS[job_id]["results"] = results
+            
+        JOBS_COMPLETED.labels(status="completed").inc()
+        IMAGES_PROCESSED_TOTAL.labels(endpoint="/jobs").inc(len(results))
+        
+        # Send callback if provided
+        if job["callback_url"]:
+            send_callback(job["callback_url"], job_id, "completed")
+            
+    except Exception as e:
+        # Job failed
+        with JOB_LOCK:
+            JOBS[job_id]["status"] = "failed"
+            JOBS[job_id]["error"] = {
+                "error_code": "PROCESSING_ERROR",
+                "message": str(e)
+            }
+            
+        JOBS_COMPLETED.labels(status="failed").inc()
+        logger.error("Job processing failed", job_id=job_id, error=str(e))
+        
+        # Send callback if provided
+        if job["callback_url"]:
+            send_callback(job["callback_url"], job_id, "failed")
+
+def send_callback(callback_url: str, job_id: str, status: str):
+    """Send callback notification"""
+    try:
+        with JOB_LOCK:
+            job = JOBS.get(job_id, {})
+            
+        payload = {
+            "job_id": job_id,
+            "status": status,
+            "request_id": job.get("request_id")
+        }
+        
+        if status == "completed":
+            payload["results_count"] = len(job.get("results", []))
+        elif status == "failed":
+            payload["error"] = job.get("error", {})
+            
+        requests.post(callback_url, json=payload, timeout=10)
+        
+    except Exception as e:
+        logger.error("Callback failed", job_id=job_id, callback_url=callback_url, error=str(e))
+
+def fetch_url_internal(url: str) -> dict:
+    """Internal URL fetching for jobs"""
+    try:
+        response = requests.get(url, timeout=30, headers={"User-Agent": "BrewChrome-Jobs/1.0"})
+        response.raise_for_status()
+        
+        content_type = response.headers.get("content-type", "").lower()
+        if not content_type.startswith("image/"):
+            return {"success": False, "error": "Not an image"}
+            
+        image_data = response.content
+        if len(image_data) > 50 * 1024 * 1024:
+            return {"success": False, "error": "Image too large"}
+            
+        image_base64 = base64.b64encode(image_data).decode("utf-8")
+        return {
+            "success": True,
+            "image": f"data:{content_type};base64,{image_base64}"
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
 ENGINE = PaletteEngine()
 
 def make_error(status_code: int, error_code: str, message: str):
@@ -432,6 +590,116 @@ def process_zip_endpoint():
 
     except Exception as e:
         return make_error(500, "INTERNAL_ERROR", "Unexpected error occurred")
+
+@app.route("/jobs", methods=["POST"])
+def create_job_endpoint():
+    """Create async job for batch processing"""
+    try:
+        callback_url = None
+        ttl_h = 24
+        
+        # Handle multipart/form-data
+        if 'zip_file' in request.files:
+            file = request.files['zip_file']
+            if file.filename == '':
+                return make_error(400, "NO_INPUT", "No file selected")
+            
+            # Check file size (500MB limit for async jobs)
+            file.seek(0, 2)
+            file_size = file.tell()
+            file.seek(0)
+            
+            if file_size > 500 * 1024 * 1024:
+                return make_error(413, "PAYLOAD_TOO_LARGE", "ZIP exceeds 500MB limit")
+            
+            file_data = file.read()
+            zip_base64 = base64.b64encode(file_data).decode('utf-8')
+            zip_data = f"data:application/zip;base64,{zip_base64}"
+            
+            # Get optional parameters from form
+            callback_url = request.form.get('callback_url')
+            ttl_h = int(request.form.get('ttl_h', 24))
+            
+            job_id = create_job("zip_batch", {"zip_data": zip_data}, callback_url, ttl_h)
+            
+        else:
+            # Handle JSON
+            data = request.get_json()
+            if not data:
+                return make_error(400, "NO_INPUT", "No input provided")
+            
+            callback_url = data.get('callback_url')
+            ttl_h = data.get('ttl_h', 24)
+            
+            if 'urls' in data:
+                # Multiple URLs
+                urls = data['urls']
+                if not isinstance(urls, list) or len(urls) == 0:
+                    return make_error(400, "INVALID_INPUT", "URLs must be non-empty array")
+                
+                job_id = create_job("url_batch", {"urls": urls}, callback_url, ttl_h)
+                
+            elif 'zip' in data:
+                # ZIP data
+                zip_data = data['zip']
+                job_id = create_job("zip_batch", {"zip_data": zip_data}, callback_url, ttl_h)
+                
+            else:
+                return make_error(400, "INVALID_INPUT", "Provide 'urls' array or 'zip' data")
+        
+        # Estimate ETA based on job type and size
+        with JOB_LOCK:
+            job = JOBS[job_id]
+            if job["type"] == "zip_batch":
+                eta_s = 120  # 2 minutes for ZIP
+            else:
+                eta_s = len(job["data"].get("urls", [])) * 10  # 10s per URL
+        
+        return jsonify({
+            "job_id": job_id,
+            "status": "queued",
+            "eta_s": min(eta_s, 900),  # Max 15 minutes
+            "request_id": getattr(g, "request_id", "")
+        }), 202
+        
+    except Exception as e:
+        return make_error(500, "INTERNAL_ERROR", "Job creation failed")
+
+@app.route("/jobs/<job_id>", methods=["GET"])
+def get_job_status(job_id: str):
+    """Get job status and results"""
+    try:
+        with JOB_LOCK:
+            job = JOBS.get(job_id)
+            
+        if not job:
+            return make_error(404, "JOB_NOT_FOUND", "Job not found")
+        
+        # Check TTL
+        if time.time() - job["created_at"] > job["ttl_h"] * 3600:
+            with JOB_LOCK:
+                JOBS.pop(job_id, None)
+            return make_error(410, "JOB_EXPIRED", "Job results expired")
+        
+        response = {
+            "status": job["status"],
+            "request_id": job["request_id"]
+        }
+        
+        if job["status"] == "processing":
+            response["progress"] = job["progress"]
+            
+        elif job["status"] == "completed":
+            response["results"] = job["results"]
+            # For large results, could add download_url here
+            
+        elif job["status"] == "failed":
+            response.update(job["error"])
+        
+        return jsonify(response)
+        
+    except Exception as e:
+        return make_error(500, "INTERNAL_ERROR", "Failed to get job status")
 
 @app.route("/metrics", methods=["GET"])
 def metrics():

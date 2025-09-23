@@ -186,6 +186,107 @@ export const api = {
     }
   },
 
+  async createJob(files: File[], options: { callback_url?: string; ttl_h?: number } = {}): Promise<{ job_id: string; status: string; eta_s: number; request_id: string }> {
+    const requestId = generateRequestId();
+    
+    try {
+      const formData = new FormData();
+      
+      // For now, support single ZIP file
+      if (files.length === 1 && files[0].name.endsWith('.zip')) {
+        formData.append('zip_file', files[0]);
+      } else {
+        throw new Error('Job API currently supports single ZIP files only');
+      }
+      
+      if (options.callback_url) {
+        formData.append('callback_url', options.callback_url);
+      }
+      if (options.ttl_h) {
+        formData.append('ttl_h', options.ttl_h.toString());
+      }
+
+      logger.debug('API Call: create job', { 
+        fileCount: files.length,
+        request_id: requestId,
+        options 
+      });
+
+      const response = await fetch(`${API_BASE}/jobs`, {
+        method: 'POST',
+        headers: {
+          'X-Request-Id': requestId,
+        },
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const errorMsg = getErrorMessage(response.status, data);
+        logger.error('API Error: create job', { 
+          status: response.status, 
+          error_code: data.error_code,
+          message: data.message,
+          request_id: requestId,
+        });
+        throw new Error(`${errorMsg} — id ${requestId}`);
+      }
+
+      logger.info('API Success: job created', { 
+        job_id: data.job_id,
+        eta_s: data.eta_s,
+        request_id: requestId 
+      });
+
+      return data;
+    } catch (error) {
+      logger.apiError('/jobs', error);
+      throw error;
+    }
+  },
+
+  async getJobStatus(jobId: string): Promise<{ status: string; progress?: number; results?: any[]; error_code?: string; message?: string; request_id: string }> {
+    const requestId = generateRequestId();
+    
+    try {
+      logger.debug('API Call: get job status', { job_id: jobId, request_id: requestId });
+
+      const response = await fetch(`${API_BASE}/jobs/${jobId}`, {
+        method: 'GET',
+        headers: {
+          'X-Request-Id': requestId,
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const errorMsg = getErrorMessage(response.status, data);
+        logger.error('API Error: get job status', { 
+          status: response.status, 
+          error_code: data.error_code,
+          message: data.message,
+          job_id: jobId,
+          request_id: requestId,
+        });
+        throw new Error(`${errorMsg} — id ${requestId}`);
+      }
+
+      logger.debug('API Success: job status', { 
+        job_id: jobId,
+        status: data.status,
+        progress: data.progress,
+        request_id: requestId 
+      });
+
+      return data;
+    } catch (error) {
+      logger.apiError(`/jobs/${jobId}`, error);
+      throw error;
+    }
+  },
+
   async fetchUrl(url: string): Promise<FetchUrlResponse> {
     const requestId = generateRequestId();
     
