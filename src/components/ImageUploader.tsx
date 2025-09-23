@@ -1,6 +1,6 @@
 import React, { useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
-import { Upload, Image, Archive } from 'lucide-react';
+import { Upload, ImageIcon, FolderArchive } from 'lucide-react';
 
 interface ImageUploaderProps {
   onFileSelect: (file: File) => void;
@@ -34,33 +34,58 @@ export const ImageUploader: React.FC<ImageUploaderProps> = ({
     <div
       {...getRootProps()}
       className={`
-        border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-colors
-        ${isDragActive ? 'border-blue-500 bg-blue-50' : 'border-gray-300 hover:border-gray-400'}
+        relative border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-all duration-200
+        ${isDragActive
+          ? 'border-primary bg-accent/50 scale-102'
+          : 'border-border hover:border-primary/50 hover:bg-accent/20'
+        }
         ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}
       `}
     >
       <input {...getInputProps()} />
 
-      <div className="flex flex-col items-center space-y-4">
-        {isDragActive ? (
-          <Upload className="w-12 h-12 text-blue-500" />
-        ) : (
-          <div className="flex space-x-2">
-            <Image className="w-12 h-12 text-gray-400" />
-            <Archive className="w-12 h-12 text-gray-400" />
-          </div>
-        )}
+      <div className="flex flex-col items-center space-y-6">
+        <div className={`
+          p-4 rounded-2xl transition-colors duration-200
+          ${isDragActive ? 'bg-primary/10' : 'bg-accent'}
+        `}>
+          {isDragActive ? (
+            <Upload className="w-8 h-8 text-primary" />
+          ) : (
+            <div className="flex space-x-1">
+              <ImageIcon className="w-8 h-8 text-muted-foreground" />
+              <FolderArchive className="w-8 h-8 text-muted-foreground" />
+            </div>
+          )}
+        </div>
 
-        <div>
-          <p className="text-lg font-medium text-gray-700">
-            {isDragActive ? 'Drop files here' : 'Drop images or ZIP files here'}
+        <div className="space-y-2">
+          <h3 className="text-xl font-medium text-foreground">
+            {isDragActive ? 'Drop your files here' : 'Upload Images or ZIP'}
+          </h3>
+          <p className="text-muted-foreground">
+            Drag and drop files or click to browse
           </p>
-          <p className="text-sm text-gray-500 mt-1">or click to select files</p>
-          <p className="text-xs text-gray-400 mt-2">
-            Supports: PNG, JPG, JPEG, WebP, ZIP
-          </p>
+          <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <span>PNG</span>
+            <span>•</span>
+            <span>JPG</span>
+            <span>•</span>
+            <span>WebP</span>
+            <span>•</span>
+            <span>ZIP</span>
+          </div>
         </div>
       </div>
+
+      {isLoading && (
+        <div className="absolute inset-0 flex items-center justify-center bg-background/50 backdrop-blur-sm rounded-xl">
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <div className="w-4 h-4 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+            <span>Processing...</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

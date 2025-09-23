@@ -10,6 +10,6 @@ describe('App', () => {
 
   it('renders upload area', () => {
     render(<App />);
-    expect(screen.getByText(/drop images or zip files here/i)).toBeDefined();
+    expect(screen.getByText(/choose files/i)).toBeDefined();
   });
 });

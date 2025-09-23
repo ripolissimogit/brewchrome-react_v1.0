@@ -1,0 +1,448 @@
+================================================================================
+            SPECIFICA FUNZIONALE – SERVIZIO SERVER DI ELABORAZIONE IMMAGINI
+================================================================================
+
+Modello che ha elaborato il report: OpenAI Codex CLI Agent (GPT-4.1-class)
+Versione modello: 2025-09 runtime
+Versione documento: 2.0
+Data: 23/09/2025
+
+1) Contesto & Scopo
+--------------------------------------------------------------------------------
+- Scopo: fornire un servizio HTTP per l’elaborazione deterministica di immagini
+  con pipeline configurabile (validazione, normalizzazione, ridimensionamento, filtri),
+  restituendo immagini e/o metadati tramite API sincrone e, opzionalmente, asincrone.
+- Utenti/client: script CLI e batch, browser via frontend, altri servizi backend
+  (microservizi, worker), pipeline CI/CD.
+- Esempi d’uso:
+  - Normalizzare immagini prodotto per e-commerce (max lato 1024, sfondo bianco).
+  - Generare miniature e anteprime per CMS e gallerie.
+  - Applicare watermark aziendale e convertire a PNG/WebP.
+  - Validare asset (dimensioni/formato) in build pipeline.
+
+2) API di alto livello
+--------------------------------------------------------------------------------
+- GET /health
+  - Scopo: health check leggero del processo.
+  - Uso: probing da LB/monitoring.
+  - Prerequisiti: nessuno.
+
+- GET /ready
+  - Scopo: readiness (dipendenze e risorse pronte).
+  - Uso: orchestratori (K8s) per traffico.
+  - Prerequisiti: init completato.
+
+- POST /process
+  - Scopo: elaborazione sincrona immagini (singola/multipla/ZIP/URL).
+  - Uso: richieste immediate con risposta diretta.
+  - Prerequisiti: input valido secondo regole in §3.
+
+- POST /jobs
+  - Scopo: avviare job asincrono per batch pesanti.
+  - Uso: quando dimensione/numero supera limiti sincroni consigliati.
+  - Prerequisiti: payload valido; client gestisce polling.
+
+- GET /jobs/{job_id}
+  - Scopo: interrogare stato e, a completamento, ottenere risultati/URL.
+  - Uso: polling con backoff.
+  - Prerequisiti: job_id valido e non scaduto.
+
+3) Contratti di richiesta/risposta
+--------------------------------------------------------------------------------
+3.1 GET /health
+- Accetta: nessun body.
+- Risponde: application/json
+  { "status": "ok", "version": "v1", "uptime_s": 1234 }
+- Header: Cache-Control: no-store
+
+Esempio
+curl -sS http://localhost:8080/health
+
+3.2 GET /ready
+- Accetta: nessun body.
+- Risponde: application/json
+  { "ready": true, "dependencies": {"disk": true, "mem": true} }
+- Header: Cache-Control: no-store
+
+3.3 POST /process
+- Content-Type accettati:
+  - multipart/form-data (file e parametri);
+  - application/json (base64, URL);
+  - application/zip (body binario ZIP, opzionale ma consigliato usare multipart).
+
+- Parametri comuni (sia multipart che json):
+  - steps (string, opzionale): pipeline predefinita per nome. Valori: "default",
+    "thumbnail", "grayscale", "watermark". Default: "default".
+  - max_side (int, opzionale): 64–8192 px. Default: 1024.
+  - format (string, opzionale): "png" | "jpeg" | "webp". Default: "png".
+  - quality (int, opz.): 1–100, solo per formati lossy. Default: 90.
+  - parallel (bool, opz.): se true, consente parallelismo interno. Default: false.
+
+- Regole input immagini:
+  - Singolo file: field "image" (multipart) o JSON base64 in "image".
+  - Multipli file: fields ripetuti "images" (multipart) o JSON array base64 in "images".
+  - ZIP: field "zip_file" (multipart) o body application/zip; estensioni ammesse
+    all’interno: .jpg, .jpeg, .png, .webp, .bmp; file non immagine vengono ignorati
+    e conteggiati come skipped.
+  - URL remoti: JSON con "url" (string) o "urls" (array string).
+
+- Regole ZIP:
+  - Estensioni ammesse: jpg, jpeg, png, webp, bmp (case-insensitive).
+  - Path traversal: rifiutare entry con .., percorsi assoluti, o separatori anomali.
+  - Dimensione: max 150 MB compressi; max 300 MB decompressi; max 200 file;
+    depth directory ≤ 10.
+
+- Regole URL:
+  - Protocolli: http, https.
+  - Timeout connessione+download: 20 s (connessione) + 40 s (download).
+  - Dimensione max download: 50 MB per URL.
+  - Redirect: max 5; blocco IP privati/loopback/link-local; validazione hostname.
+
+- Output:
+  - Se input singolo: risponde con immagine (image/png|image/jpeg|image/webp) se
+    header Accept preferisce binario; altrimenti JSON con risultato base64.
+  - Se multiplo/ZIP: application/zip con file output_#.png (o formato selezionato)
+    e manifest.json; in alternativa JSON con URL firmati se configurato lo storage.
+
+- Header rilevanti:
+  - Content-Type, Content-Length, Content-Disposition (per download zip/immagine),
+    X-Request-Id, X-Processing-Time-ms.
+
+Esempi concreti
+1) Singolo file (multipart)
+curl -X POST http://localhost:8080/process \
+  -F "image=@/path/in.png" -F steps=grayscale -F max_side=1024 -F format=png
+
+Risposta (binaria): HTTP/1.1 200 OK
+Content-Type: image/png
+Content-Length: 123456
+Content-Disposition: inline; filename="output.png"
+
+2) JSON con URL
+curl -X POST http://localhost:8080/process \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/pic.jpg","steps":"thumbnail","max_side":512}'
+
+Risposta (JSON): 200 OK
+{"success":true,"result":{"mime":"image/png","base64":"iVBORw0K..."}}
+
+3) ZIP multipart
+curl -X POST http://localhost:8080/process \
+  -F "zip_file=@/path/batch.zip" -F steps=default -F format=png
+
+Risposta (ZIP): 200 OK
+Content-Type: application/zip
+Content-Disposition: attachment; filename="results.zip"
+; contiene output_1.png, output_2.png, manifest.json
+
+3.4 POST /jobs
+- Accetta: multipart/form-data, application/json, application/zip (come /process).
+- Parametri addizionali: callback_url (string, opz., https), ttl_h (int, 1–168, def 24).
+- Risponde: 202 Accepted
+  {"job_id":"job_abc123","status":"queued","eta_s":120}
+
+Esempio
+curl -X POST http://localhost:8080/jobs -F "zip_file=@/path/batch.zip"
+
+3.5 GET /jobs/{job_id}
+- Accetta: nessun body.
+- Risponde: application/json
+  - queued|processing: {"status":"processing","progress":0–100}
+  - completed: {"status":"completed","download_url":"..."} oppure
+    {"status":"completed","results":[{mime,base64}...]}
+  - failed: {"status":"failed","error_code":"...","message":"..."}
+
+4) Algoritmo/Pipeline di elaborazione
+--------------------------------------------------------------------------------
+Sequenza (pipeline "default"):
+1. Validazione input (MIME/estensioni, limiti MB/px, conteggi).
+2. Decodifica/lettura immagine; rifiuto metadati pericolosi; gestione ICC profile.
+3. Normalizzazione colore: convert to RGB; rimozione alpha opzionale.
+4. Ridimensionamento: mantenere aspect ratio; max lato = max_side (def 1024),
+   algoritmo: Lanczos. Se px totali > 20 MP, downscale preventivo.
+5. Orientamento EXIF: applicare rotazione corretta; strip EXIF se configured.
+6. Filtri condizionali:
+   - grayscale (opz.): conversione luminanza.
+   - watermark (opz.): overlay PNG in posizione bottom-right, margine 2% lato,
+     opacità 70% (param watermark_opacity 1–100; default 70).
+   - thumbnail (opz.): crop center square e resize a 256 px.
+7. Encoding: formato scelto (png/jpeg/webp); qualità (jpeg/webp quality 90 di default),
+   limitazione chroma subsampling (4:4:4) se qualità ≥ 90.
+8. Output packing: singolo file oppure archivio zip con naming deterministico
+   (output_1.png ... output_N.png) e manifest.json con mapping input→output.
+
+Parametri e default principali
+- max_side: 1024; range 64–8192.
+- format: png; valori ammessi: png|jpeg|webp.
+- quality: 90; range 1–100; applicabile a jpeg/webp.
+- steps: default|grayscale|thumbnail|watermark; combinazioni possibili via array
+  (es. ["default","watermark"]) solo in v2; in v1 una sola pipeline nominale.
+- parallel: false; se true, max concurrency = min(immagini, CPU).
+
+Gestione di più immagini
+- Ordine: definito dall’ordine di ricezione per multipart, alfabetico per ZIP,
+  e ordine di lista per JSON.
+- Parallelismo: disattivato per impostazione predefinita; attivabile con flag,
+  con limiti di memoria e CPU.
+
+Idempotenza e determinismo
+- Stesso input + stessi parametri ⇒ stesso output (nomi file stabili, stessa codifica).
+- Randomness evitata; dove necessario, seed fisso.
+
+5) Errori & codici di stato
+--------------------------------------------------------------------------------
+HTTP | Codice interno       | Messaggio                         | Scenario
+200  | SUCCESS              | Processing completed              | Tutto ok
+202  | JOB_ACCEPTED         | Job queued                        | /jobs creato
+400  | NO_INPUT             | No input provided                  | Body vuoto/parametri mancanti
+400  | INVALID_PARAM        | Invalid parameter                  | Range/valore fuori specifica
+400  | INVALID_URL          | Invalid URL                        | URL malformato
+400  | PRIVATE_IP           | Private IP not allowed             | SSRF
+413  | PAYLOAD_TOO_LARGE    | Payload too large                  | File/ZIP oltre limiti
+415  | UNSUPPORTED_MEDIA    | Unsupported media type             | Content-Type non ammesso
+422  | INVALID_IMAGE        | Unable to decode image             | File corrotto
+422  | INVALID_ZIP          | Invalid ZIP                        | ZIP corrotto/struttura
+422  | ZIP_TRAVERSAL        | Invalid file path in ZIP           | Traversal rilevato
+408  | URL_TIMEOUT          | URL fetch timeout                  | Timeout scaricamento
+502  | UPSTREAM_ERROR       | Upstream error                     | Fetch 5xx
+500  | INTERNAL_ERROR       | Internal server error              | Eccezione non gestita
+
+Formato errore JSON
+{"success":false,"error_code":"INVALID_PARAM","message":"quality must be 1..100","request_id":"req_123","ts":"2025-09-23T12:00:00Z"}
+
+6) Sicurezza
+--------------------------------------------------------------------------------
+- Limiti dimensioni: file singolo ≤ 50 MB; ZIP compresso ≤ 150 MB; decompresso ≤ 300 MB;
+  immagini fino a 20 MP; N immagini richieste sincrone consigliate ≤ 20.
+- Blocchi: rifiuto formati pericolosi/eseguibili; sanitizzazione nomi; blocco path
+  traversal; difesa da ZIP bomb con ratio compressione e limiti entry.
+- URL: blocco IP privati/loopback/link-local; DNS resolution sicura; timeouts;
+  limitazione redirect; dimensione massima download 50 MB.
+- Rate limit/burst: consigliato 60 req/min per IP, burst 20; 5 job/min per IP.
+- Log sanitization: omettere token/query sensibili da URL; truncare base64 nei log.
+
+7) Performance & Scalabilità
+--------------------------------------------------------------------------------
+- Limiti consigliati: ≤ 10 immagini per richiesta sincrona, ≤ 50 MB totali; oltre, usare /jobs.
+- Tempi stimati (indicativi su 2 vCPU):
+  - 1 immagine 1920x1080: 100–300 ms (grayscale), 200–600 ms (watermark).
+  - ZIP 10 immagini (40 MB): 3–8 s.
+- Modalità asincrona: usare /jobs per ZIP > 10 immagini o > 50 MB totali.
+- Memoria: elaborazione in RAM; buffer a stream quando disponibile; spill su /tmp
+  per ZIP > 100 MB; cleanup garantito.
+
+8) Osservabilità & Operatività
+--------------------------------------------------------------------------------
+- Log minimi: livello INFO per start/stop richiesta con request_id, endpoint, durata ms,
+  conteggi file, dimensioni; WARN per auto-resize/skip; ERROR con stack trace sanificato.
+- /health: verifica loop eventi, heap libero > 100 MB, spazio /tmp > 1 GB.
+- /ready: verifica caricamento configurazione, raggiungibilità storage/SE (se usati).
+- Metriche: requests_total{endpoint,code}, request_duration_ms histogram, bytes_in/bytes_out,
+  images_processed_total, errors_total{code}, active_jobs, job_latency_ms.
+
+9) Versioning & Compatibilità
+--------------------------------------------------------------------------------
+- Versione API: v1 (prefisso path /v1 opzionale) o header X-API-Version: 1.
+- Evoluzione compatibile: nuovi parametri opzionali con default stabili; nuovi endpoint.
+- Breaking changes: solo in v2 con deprecation notice ≥ 6 mesi.
+
+10) Accettazione (Definition of Done)
+--------------------------------------------------------------------------------
+A1 JSON con 1 URL → 200 image/png
+- Precondizioni: URL https valido < 5 MB.
+- Richiesta: POST /process {"url":"https://example.com/img.jpg","format":"png"}
+- Risposta attesa: 200, Content-Type: application/json con base64 PNG oppure image/png
+  se Accept: image/*; immagine decodificabile.
+
+A2 multipart 2 file → 200 application/zip con 2 PNG
+- Precondizioni: due file .jpg validi; format=png.
+- Richiesta: multipart con images=@a.jpg, images=@b.jpg.
+- Risposta: 200, application/zip, file output_1.png, output_2.png, manifest.json.
+
+A3 ZIP con 3 immagini → 200 ZIP con 3 output_#.png
+- Precondizioni: ZIP 3 immagini, nessuna traversal.
+- Richiesta: multipart zip_file=@pics.zip.
+- Risposta: 200, application/zip, 3 file nominati output_1.png..output_3.png + manifest.
+
+A4 Nessun input → 400 con messaggio chiaro
+- Richiesta: POST /process body vuoto.
+- Risposta: 400, JSON errore con error_code NO_INPUT.
+
+A5 URL timeout → 408 o 400 coerente
+- Precondizioni: URL lento > timeout.
+- Risposta: 408 URL_TIMEOUT con message esplicativo.
+
+A6 ZIP con path traversal → 400/422
+- Precondizioni: ZIP con entry ../../evil.png.
+- Risposta: 422 ZIP_TRAVERSAL con messaggio chiaro.
+
+A7 Immagine troppo grande → 413/422
+- Precondizioni: file > 50 MB o > 20 MP non riducibile.
+- Risposta: 413 PAYLOAD_TOO_LARGE oppure 422 INVALID_IMAGE se corrotto.
+
+11) Assunzioni & Rischi
+--------------------------------------------------------------------------------
+- Assunzioni: nessun storage persistente richiesto in v1; watermark fornito come
+  asset statico server-side; sicurezza rete standard; orchestrazione container.
+- Rischi: ZIP bomb (mitigato da limiti e ratio), OOM su batch (limitare parallelismo),
+  SSRF (blocchi IP/timeout), latenza imprevedibile su URL; vulnerabilità librerie (patching).
+- Alternative: pipeline plugin- based vs fissa; raccomandata: pipeline modulare ma
+  con profili predefiniti per semplicità client; sincro+asincrono coesistono.
+
+12) OpenAPI 3.1 (minimo, valido)
+--------------------------------------------------------------------------------
+openapi: 3.1.0
+info:
+  title: Image Processing Service API
+  version: "v1"
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  version: { type: string }
+                  uptime_s: { type: number }
+  /ready:
+    get:
+      summary: Readiness check
+      responses:
+        '200':
+          description: Ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ready: { type: boolean }
+  /process:
+    post:
+      summary: Synchronous image processing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image: { type: string, description: base64 data URL }
+                images: { type: array, items: { type: string } }
+                url: { type: string, format: uri }
+                urls: { type: array, items: { type: string, format: uri } }
+                steps: { type: string, enum: [default, thumbnail, grayscale, watermark] }
+                max_side: { type: integer, minimum: 64, maximum: 8192 }
+                format: { type: string, enum: [png, jpeg, webp] }
+                quality: { type: integer, minimum: 1, maximum: 100 }
+                parallel: { type: boolean }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image: { type: string, format: binary }
+                images:
+                  type: array
+                  items: { type: string, format: binary }
+                zip_file: { type: string, format: binary }
+                steps: { type: string }
+                max_side: { type: integer }
+                format: { type: string }
+                quality: { type: integer }
+                parallel: { type: boolean }
+      responses:
+        '200':
+          description: Processed image or ZIP
+          content:
+            image/png: {}
+            image/jpeg: {}
+            image/webp: {}
+            application/zip: {}
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  result:
+                    type: object
+                    properties:
+                      mime: { type: string }
+                      base64: { type: string }
+        '400': { description: Bad request }
+        '413': { description: Payload too large }
+        '415': { description: Unsupported media type }
+        '422': { description: Unprocessable }
+        '500': { description: Server error }
+  /jobs:
+    post:
+      summary: Create async processing job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string, format: uri }
+                urls: { type: array, items: { type: string, format: uri } }
+                steps: { type: string }
+                max_side: { type: integer }
+                format: { type: string }
+                quality: { type: integer }
+                callback_url: { type: string, format: uri }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                zip_file: { type: string, format: binary }
+                steps: { type: string }
+      responses:
+        '202':
+          description: Job accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id: { type: string }
+                  status: { type: string }
+  /jobs/{job_id}:
+    get:
+      summary: Get job status/result
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Job status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [queued, processing, completed, failed] }
+                  progress: { type: integer, minimum: 0, maximum: 100 }
+                  download_url: { type: string, format: uri }
+                  results:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        mime: { type: string }
+                        base64: { type: string }
+                  error_code: { type: string }
+                  message: { type: string }
+
+================================================================================
+FINE DOCUMENTO – SPECIFICA FUNZIONALE v2.0
+================================================================================
+

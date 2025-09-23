@@ -1,0 +1,170 @@
+================================================================================
+ SPECIFICA DI INTEGRAZIONE – FRONTEND (Vercel) ↔ BACKEND (Cloud Run/Flask)
+================================================================================
+
+Modello che ha elaborato il report: OpenAI Codex CLI Agent (GPT‑4.1‑class)
+Versione modello: runtime 2025‑09
+Versione documento: 1.0
+Data: 23/09/2025
+
+1) Perimetro & Obiettivo
+--------------------------------------------------------------------------------
+- Obiettivo: descrivere come il frontend React (deploy Vercel) interagisce con il
+  backend corrente tramite proxy /api su Vercel, evidenziando formati, limiti e
+  dipendenze operative per un’integrazione corretta.
+- Contesto: il frontend utilizza `API_BASE = '/api'` (src/services/api.ts). In
+  produzione, Vercel riscrive `/api/*` verso il backend Cloud Run.
+
+2) Routing e Proxy (Vercel)
+--------------------------------------------------------------------------------
+- Base URL frontend (esempio da test):
+  https://brewchrome-react-v1-0-8ffxnf7du-ripolissimos-projects.vercel.app
+
+- Rewrites Vercel (vercel.json):
+  /api/(.*) → https://brewchrome-backend-736130833520.us-central1.run.app/$1
+
+- Comportamento verificato (23/09/2025):
+  - GET /api/health → 200 application/json
+    { status: "healthy", service: "brewchrome-backend", version: "3.1.1", features: ["colorthief","zip_processing"] }
+  - GET /api/fetch_url → 405 Method Not Allowed (richiede POST)
+
+- Implicazioni:
+  - Stessa origine (same-origin) lato browser: nessun CORS lato FE.
+  - CORS lato BE comunque aperto (Access-Control-Allow-Origin: *), ma non necessario.
+
+3) Flussi di chiamata dal Frontend
+--------------------------------------------------------------------------------
+3.1 Health check
+- Endpoint: GET /api/health
+- Uso UI: al mount dell’app per mostrare lo stato backend (ConsoleFooter, App.tsx).
+- Gestione errori: se non OK → `backendStatus = false` (warning nel logger).
+
+3.2 Elaborazione immagine singola
+- Endpoint: POST /api/process
+- Invocazione UI: JSON (NON multipart). Il file è convertito in data URL base64
+  via FileReader e inviato in body come `{ image: "data:image/...;base64,..." }`.
+- Esempio richiesta:
+  fetch('/api/process', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: dataUrl }) })
+- Risposta attesa dal FE:
+  { success: true, palette: [[R,G,B] x10] }
+- Mapping lato FE: array RGB → oggetti {r,g,b} (src/services/api.ts).
+- Visualizzazione: la galleria mostra anteprima da `socialImage` (ProcessedImage.socialImage),
+  ma l’attuale backend non restituisce `social_image` su /process; l’UI imposta stringa vuota.
+
+3.3 Elaborazione ZIP (batch semplificato)
+- Endpoint: POST /api/process_zip
+- Invocazione UI: multipart/form-data con campo `zip_file` (FormData).
+- Esempio richiesta:
+  const fd = new FormData(); fd.append('zip_file', file); fetch('/api/process_zip', { method: 'POST', body: fd })
+- Risposta attesa dal FE (src/types.ts):
+  { success: true, results?: [{ filename, palette: Color[], social_image: string }...] }
+- Nota: il backend attuale restituisce un oggetto riassuntivo (palette prima immagine,
+  processed_count, total_files) e NON una lista `results` né `social_image`; l’UI
+  gestisce questa differenza con log, ma per una UX completa servono adeguamenti.
+
+3.4 Recupero immagine da URL (server-side fetch)
+- Endpoint: POST /api/fetch_url
+- Invocazione UI: funzione disponibile (api.fetchUrl) ma non cablata nella tab “URLs”.
+- Richiesta: { url: string }
+- Risposta (BE): { success, image: dataURL, content_type, size_mb } o errore.
+
+4) Vincoli lato Frontend
+--------------------------------------------------------------------------------
+- Validazione input (OriginalUploader.tsx):
+  - Tab Files: accetta immagini (JPG, PNG, WebP, HEIC, AVIF, TIFF, GIF, BMP, SVG).
+  - Tab Archive: accetta solo ZIP.
+  - Tab URLs: input UI presente ma non collegato alla chiamata api.fetchUrl.
+  - Limite dimensione file: 30 MB (UI), con messaggio: "File too large...".
+
+- Stato e mapping (App.tsx):
+  - palette: mappata a oggetti {r,g,b} da array [[R,G,B]].
+  - socialImage: prende `result.social_image || ''` (attualmente vuoto).
+  - ZIP: atteso `results[]` con palette/social_image per ciascun file, ma BE attuale
+    non aderisce; UI gestisce errori/avvisi via logger.
+
+- Download (services/download.ts):
+  - downloadAllAsZip() scarica `image.socialImage`; se vuoto → fallisce il fetch.
+
+- Telemetria (services/logger.ts):
+  - Usa Vercel Analytics: eventi log_info/log_warn/log_error, user_action, file_processing.
+  - I messaggi includono contesto (filename, size, ecc.).
+
+5) Contratti effettivi attesi dal FE (riassunto)
+--------------------------------------------------------------------------------
+- POST /api/process (JSON)
+  - Input: { image: dataURL base64 }
+  - Output FE-atteso minimo: { success: true, palette: [[R,G,B] x10] }
+  - Output FE-atteso ottimale: + social_image (data:image/png;base64,...) per preview e download.
+
+- POST /api/process_zip (multipart)
+  - Input: FormData { zip_file: File }
+  - Output FE-atteso: { success: true, results: [{ filename, palette: [[R,G,B]], social_image: dataURL }] }
+
+- POST /api/fetch_url (JSON)
+  - Input: { url: string }
+  - Output FE-atteso: { success: true, image: dataURL, content_type, size_mb }
+
+- GET /api/health
+  - Output FE-visualizzato: versione backend e feature.
+
+6) Gap di integrazione rilevati
+--------------------------------------------------------------------------------
+- social_image mancante in /process e /process_zip del backend attuale →
+  - Effetti: preview immagini vuota in galleria e download ZIP non utilizzabile.
+  - Opzioni:
+    1) Backport BE: includere `social_image` (come generato da core) nelle risposte.
+    2) FE fallback: usare miniatura client‑side (data URL originale) quando `social_image` è assente.
+
+- Differenza shape /process_zip:
+  - FE si aspetta `results[]`; BE restituisce un riassunto (palette prima immagine,
+    processed_count, total_files). Da allineare (modifica BE o adattamento FE).
+
+- Tab URLs non collegata:
+  - UI presente ma non invoca `api.fetchUrl`; serve wiring per UX completa.
+
+7) Raccomandazioni operative
+--------------------------------------------------------------------------------
+- Corto termine (senza breaking):
+  - Aggiungere `social_image` a /process (JSON) nel BE attuale.
+  - Per /process_zip: aggiungere opzionalmente `results[]` con almeno filename + palette.
+  - In FE: fallback preview se `social_image` assente; disabilitare download batch se vuoto.
+
+- Medio termine (allineamento con roadmap):
+  - Introdurre endpoint /ready e, se necessario, /jobs per batch grandi.
+  - Uniformare status code semantici (4xx/5xx) e mantenere `success` per retrocompatibilità.
+  - Metriche e log strutturati per diagnosi.
+
+8) Esempi end‑to‑end (Vercel)
+--------------------------------------------------------------------------------
+- Health
+  curl -sS https://<frontend-vercel>/api/health
+
+- Process (JSON base64)
+  curl -X POST https://<frontend-vercel>/api/process \
+    -H "Content-Type: application/json" \
+    -d '{"image":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChAI9jU77zgAAAABJRU5ErkJggg=="}'
+
+- ZIP (multipart)
+  curl -X POST https://<frontend-vercel>/api/process_zip \
+    -F "zip_file=@/path/batch.zip"
+
+9) Definition of Done (integrazione FE)
+--------------------------------------------------------------------------------
+- H1: /api/health mostrato in ConsoleFooter con version = 3.1.1.
+- H2: Upload singolo → palette visibile e anteprima immagine non vuota (social_image o fallback).
+- H3: Upload ZIP → galleria mostra n voci con palette; download disabilitato se social_image mancante.
+- H4: Errori BE (success:false) danno messaggi UI chiari senza crash; logger invia eventi.
+- H5: Tab URLs → (opzionale) collegata a /api/fetch_url con validazioni base.
+
+10) Allegati (punti codice rilevanti)
+--------------------------------------------------------------------------------
+- API client: src/services/api.ts (API_BASE='/api'; mapping palette → {r,g,b}).
+- Rewrites Vercel: vercel.json (proxy /api/* → Cloud Run backend).
+- Componenti UI: App.tsx (flow), OriginalUploader.tsx (validazioni), Gallery.tsx (preview),
+  Modal.tsx (visualizzazione), services/download.ts (download socialImage),
+  services/logger.ts (Vercel Analytics).
+
+================================================================================
+FINE DOCUMENTO – SPECIFICA DI INTEGRAZIONE FRONTEND
+================================================================================
+

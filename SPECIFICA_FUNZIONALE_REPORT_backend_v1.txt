@@ -1,0 +1,417 @@
+================================================================================
+     SPECIFICA FUNZIONALE – BACKEND ATTUALE (BREWCHROME REACT BACKEND v1.0)
+================================================================================
+
+Modello che ha elaborato il report: OpenAI Codex CLI Agent (GPT‑4.1‑class)
+Versione modello: runtime 2025‑09
+Versione documento: 1.0 (backend attuale)
+Data: 23/09/2025
+
+0) Nota introduttiva
+--------------------------------------------------------------------------------
+Questa specifica descrive fedelmente il backend attuale (Flask) presente in
+`backend-react/main.py` e la logica core in `backend-react/core/*`. La prec.
+“Spec OpenAI” con endpoint generici (/ready, /jobs, output binario opzionale)
+è da considerarsi roadmap e NON parte dell’implementazione attuale.
+
+1) Contesto & Scopo
+--------------------------------------------------------------------------------
+- Scopo: esporre API HTTP per estrarre una palette di 10 colori da immagini
+  fornite dal frontend React o da URL remoti; per batch via ZIP fornisce metadati
+  riassuntivi senza output binario.
+- Utenti/client: browser (frontend React), script semplici, altri servizi che
+  desiderano palette RGB per funzioni di visualizzazione/analisi.
+- Esempi d’uso:
+  - Caricare un’immagine e ottenere la palette RGB a 10 colori.
+  - Fornire un URL remoto e ricevere l’immagine codificata base64 (nessuna
+    elaborazione in questo endpoint).
+  - Inviare un archivio ZIP con più immagini e ottenere conteggi e la palette
+    della prima immagine processata.
+
+2) API di alto livello (ATTUALE)
+--------------------------------------------------------------------------------
+- GET /health
+  - Scopo: verifica lo stato base dell’applicazione.
+  - Quando usarla: probe da load balancer/monitoring.
+  - Prerequisiti: nessuno.
+
+- POST /process
+  - Scopo: elabora una singola immagine e restituisce la palette (RGB).
+  - Quando usarla: upload singoli dal frontend.
+  - Prerequisiti: immagine valida (PNG/JPG/JPEG/WebP) come file multipart o
+    come data URL/base64 in JSON.
+
+- POST /process_zip
+  - Scopo: elabora un archivio ZIP con più immagini (batch semplificato).
+  - Quando usarla: processi batch leggeri (≤50 immagini, ≤100MB compressi).
+  - Prerequisiti: ZIP valido contenente file immagine supportati.
+
+- POST /fetch_url
+  - Scopo: scarica server‑side un’immagine da URL (con protezioni SSRF) e
+    la restituisce codificata in base64; NON esegue estrazione palette.
+  - Quando usarla: per trasferire i contenuti al client evitando CORS/Hotlink.
+  - Prerequisiti: URL HTTP/HTTPS pubblico e raggiungibile.
+
+3) Contratti di richiesta/risposta (ATTUALE)
+--------------------------------------------------------------------------------
+Nota: il backend attuale restituisce sempre HTTP 200; eventuali errori sono
+espressi in JSON con { success: false, error: string }.
+
+3.1 GET /health
+- Richiesta: nessun body.
+- Risposta (application/json):
+  {
+    "status": "healthy",
+    "service": "brewchrome-react-backend",
+    "version": "1.0.0",
+    "features": ["colorthief", "zip_processing", "react_optimized"]
+  }
+
+Esempio
+curl -sS http://localhost:8080/health
+
+3.2 POST /process
+- Content-Type accettati:
+  - multipart/form-data con field image (singolo file);
+  - application/json con field image (string) in data URL (es. "data:image/png;base64,...")
+    oppure solo base64 (il backend riconosce entrambi).
+- Parametri/Fields:
+  - image (obbligatorio): file immagine (multipart) oppure string base64/data URL (JSON).
+- Vincoli attuali:
+  - Formati attesi: PNG, JPG, JPEG, WebP (verificati a runtime da Pillow);
+  - Nessun limite esplicito su dimensione file; se pixel totali > 4.000.000, viene
+    applicato auto‑resize con Lanczos per rientrare nel limite (ratio costante).
+- Output (application/json):
+  {
+    "success": true,
+    "palette": [[R,G,B], ... 10 elementi]
+  }
+  In caso di errore:
+  { "success": false, "error": "messaggio" }
+
+Esempi concreti
+multipart:
+curl -X POST http://localhost:8080/process \
+  -F "image=@/path/img.jpg"
+
+json (data URL):
+curl -X POST http://localhost:8080/process \
+  -H "Content-Type: application/json" \
+  -d '{"image":"data:image/png;base64,iVBORw0KGgoAAA..."}'
+
+3.3 POST /process_zip
+- Content-Type accettati:
+  - multipart/form-data con field zip_file;
+  - application/json con field zip (string base64 o data URL "data:application/zip;base64,...").
+- Parametri/Fields:
+  - zip_file (multipart) o zip (JSON) – obbligatorio.
+- Vincoli attuali:
+  - Dimensione ZIP (compressa) ≤ 100 MB; immagini supportate all’interno: .jpg,
+    .jpeg, .png, .webp (case‑insensitive); max 50 immagini.
+  - Decompressione in memoria; nessuna estrazione su disco (path traversal non applicabile).
+- Output (application/json):
+  {
+    "success": true,
+    "palette": [[R,G,B], ... 10],       // della prima immagine processata
+    "processed_count": <int>,
+    "total_files": <int>
+  }
+  In caso di errore:
+  { "success": false, "error": "messaggio" }
+
+Esempi concreti
+multipart:
+curl -X POST http://localhost:8080/process_zip \
+  -F "zip_file=@/path/batch.zip"
+
+json (data URL/base64):
+curl -X POST http://localhost:8080/process_zip \
+  -H "Content-Type: application/json" \
+  -d '{"zip":"data:application/zip;base64,UEsDBBQAAAAIA..."}'
+
+3.4 POST /fetch_url
+- Content-Type accettato: application/json.
+- Body:
+  { "url": "https://example.com/image.jpg" }
+- Regole URL:
+  - Schemi ammessi: http, https; hostname richiesto;
+  - SSRF: risoluzione DNS → IP, blocco IP privati (es. 10.x, 192.168.x, 127.x);
+  - Timeout richiesta: 30 secondi; dimensione massima risposta: 50 MB;
+  - Tipo contenuto: header Content-Type deve iniziare con "image/".
+- Output (application/json):
+  {
+    "success": true,
+    "image": "data:image/jpeg;base64,/9j/4AAQ...",
+    "content_type": "image/jpeg",
+    "size_mb": 2.45
+  }
+  In caso di errore:
+  { "success": false, "error": "messaggio" }
+
+Esempio
+curl -X POST http://localhost:8080/fetch_url \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://picsum.photos/200/300"}'
+
+Header rilevanti (tutte le API):
+- Richiesta: Content-Type (multipart/form-data o application/json)
+- Risposta: Content-Type: application/json; (HTTP status è sempre 200)
+
+4) Algoritmo/Pipeline di elaborazione (ATTUALE)
+--------------------------------------------------------------------------------
+Sequenza attuale (core PaletteEngine):
+1. Decodifica: da data URL/base64 → bytes; Pillow apre l’immagine.
+2. Normalizzazione dimensioni: se pixel totali > 4.000.000, downscale mantenendo
+   l’aspect ratio con filtro Lanczos.
+3. Smart crop 3:2: utilizzo `smartcrop.SmartCrop()` per selezionare la regione
+   d’interesse e ricavare un ritaglio in rapporto 3:2.
+4. Estrazione colori: serializza il crop a JPEG in memoria; usa ColorThief
+   con color_count = min(n_colors+5, 20), quality=1; deduplica e garantisce
+   10 colori (eventuale lieve variazione se insufficienti).
+5. Social image: genera composizione 1080x720 (75% immagine, 25% palette strip)
+   ma NON è esposta nella risposta /process (solo palette JSON).
+
+Parametri e default interni
+- n_colors = 10 (palette finale); max_pixels = 4.000.000; resize Lanczos.
+- Nessun parallelismo interno: elaborazione sequenziale.
+- Determinismo: a parità di input/lib version, output stabile; ColorThief è
+  pseudo‑deterministico in questo contesto.
+
+Gestione batch (ZIP)
+- Ordine: quello restituito da ZipFile.namelist() filtrato per estensioni.
+- Processing: sequenziale; su errore singolo file si continua (skip).
+- Output: conteggi e palette della prima immagine valida processata.
+
+5) Errori & codici di stato (ATTUALE)
+--------------------------------------------------------------------------------
+Nota: HTTP è sempre 200. Il campo JSON `success` indica esito.
+
+Codici interni (stringa in `error`):
+- "No file selected" / "No image data provided" / "No ZIP data provided" – input mancante.
+- "Base64 decode error: ..." – errore di decodifica base64.
+- "Invalid ZIP file: too small" / "Invalid ZIP file format" – ZIP non valido.
+- "ZIP too large: exceeds 100MB limit" – ZIP oltre limite compresso.
+- "Too many images: max 50 per ZIP" – superato limite conteggio.
+- "Image processing failed: ..." – eccezioni durante l’estrazione palette.
+- "Only HTTP/HTTPS URLs allowed" / "Invalid hostname" – validazione URL.
+- "Private IP addresses not allowed" – protezione SSRF.
+- "URL does not point to an image" – Content-Type non image/*.
+- "Image too large (max 50MB)" – download URL supera 50MB.
+- "Request timeout (30s)" – timeout fetch URL.
+- "Network error: ..." – errori lato requests (HTTP 4xx/5xx, ecc.).
+
+Esempi JSON di errore
+{ "success": false, "error": "No image data provided" }
+{ "success": false, "error": "Invalid ZIP file format" }
+{ "success": false, "error": "Request timeout (30s)" }
+
+6) Sicurezza (ATTUALE)
+--------------------------------------------------------------------------------
+- Limiti dimensioni: ZIP compresso ≤ 100MB; fetch URL ≤ 50MB; per /process non
+  esiste limite MB esplicito (si applica solo il limite sui pixel per resize).
+- Formati pericolosi: nei ZIP si filtrano solo estensioni immagine (.jpg/.jpeg/
+  .png/.webp); file diversi vengono ignorati.
+- Path traversal: non si estrae su disco; si legge in memoria con ZipFile.open,
+  quindi traversal non applicabile in scrittura.
+- SSRF: validazione schema (http/https), risoluzione DNS → blocco IP privati.
+  Nota: eventuali redirect non vengono limitati/ricontrollati sulla destinazione.
+- Rate limit: non implementato nel backend; demandato a proxy/Cloud Run.
+- Log: non presenti log strutturati; solo print occasionali su errori ZIP.
+- Sanitizzazione log: non logga token o base64; safe di default.
+
+7) Performance & Scalabilità (ATTUALE)
+--------------------------------------------------------------------------------
+- Limiti consigliati operative: ≤ 10 immagini per ZIP (ottimale), ≤ 50 (massimo);
+  per singoli /process, preferire immagini ≤ 10MB per ridurre latenza.
+- Tempi indicativi (macchina 2 vCPU): singolo /process 200–800ms (1–5MP);
+  ZIP 10 immagini (20–40MB): 3–8s; fetch_url aggiunge latenza di rete.
+- Memoria: elaborazione in RAM; nessun spill esplicito su disco.
+- Scalabilità: stateless; scalabile orizzontalmente tramite Cloud Run/repliche.
+
+8) Osservabilità & Operatività (ATTUALE)
+--------------------------------------------------------------------------------
+- Log minimi: standard Flask; non c’è request_id né livelli strutturati.
+- /health: verifica di base (processo vivo e import librerie implicite).
+- /ready: NON presente.
+- Metriche: NON presenti endpoint/metrica; demandate all’infrastruttura.
+
+9) Versioning & Compatibilità (ATTUALE)
+--------------------------------------------------------------------------------
+- Versione API: non versionata in path/header; versione servizio in /health (1.0.0).
+- Compatibilità: risposte JSON stabili; nessun campo opzionale non documentato.
+- Evoluzione: breaking changes soggette a major; v2 potrà introdurre /jobs, /ready,
+  formati/parametri aggiuntivi e risposte binarie opzionali (roadmap).
+
+10) Accettazione (Definition of Done – ATTUALE)
+--------------------------------------------------------------------------------
+A1 URL valido → 200 JSON con immagine base64
+- Precondizioni: URL pubblico HTTP/HTTPS a immagine < 50MB.
+- Richiesta: POST /fetch_url {"url":"https://picsum.photos/100/100"}
+- Risposta attesa: 200; JSON {success:true, image:"data:image/...;base64,...", content_type, size_mb}.
+
+A2 Singolo file (multipart) → 200 JSON con palette
+- Precondizioni: file .png/.jpg valido (≤ ~20MP per tempi ragionevoli).
+- Richiesta: POST /process con -F image=@/percorso/file.jpg
+- Risposta attesa: 200; JSON {success:true, palette:[[R,G,B] x10]}.
+
+A3 ZIP con 3 immagini → 200 JSON con conteggi
+- Precondizioni: ZIP valido ≤ 100MB con 3 file .jpg/.png/.webp.
+- Richiesta: POST /process_zip con -F zip_file=@/path/pics.zip
+- Risposta attesa: 200; JSON {success:true, processed_count:3, total_files:3, palette:[...x10] (della prima)}.
+
+A4 Nessun input → 200 JSON con errore chiaro
+- /process senza image oppure body JSON vuoto.
+- Risposta: {success:false, error:"No image data provided"}.
+
+A5 URL timeout → 200 JSON con errore
+- Precondizioni: endpoint remoto lento >30s.
+- Richiesta: POST /fetch_url con URL lento.
+- Risposta: {success:false, error:"Request timeout (30s)"}.
+
+A6 ZIP con path traversal/nested dirs → 200, skip sicuro
+- Precondizioni: ZIP con entry in sottocartelle o con path traversal nel nome.
+- Richiesta: POST /process_zip.
+- Risposta: 200; vengono letti solo file immagine; nessuna scrittura su disco; nessun errore per traversal.
+
+A7 Immagine troppo grande via URL → 200 JSON errore
+- Precondizioni: URL a file > 50MB.
+- Richiesta: POST /fetch_url con tale URL.
+- Risposta: {success:false, error:"Image too large (max 50MB)"}.
+
+11) Assunzioni & Rischi (ATTUALE)
+--------------------------------------------------------------------------------
+Assunzioni
+- Frontend effettua compressione/resize client‑side per migliorare tempi e banda.
+- Servizio eseguito dietro proxy/Cloud Run con rate limit e TLS gestiti a monte.
+- Nessuno storage persistente richiesto; tutto in memoria.
+
+Rischi
+- Dipendenze: `smartcrop` è usata nel core ma non presente in requirements.txt;
+  rischio di runtime error in ambienti puliti. Mitigazione: allineare requirements.
+- SSRF redirect: redirect non validati dopo la risoluzione iniziale; rischio bypass.
+- Assenza status code semantici: i client devono basarsi su success/error.
+- ZIP bomb: non esiste controllo su rapporto compressione/decompressione.
+
+Design alternativi (ROADMAP sintetica)
+- Aggiungere /ready e /jobs per carichi pesanti; introdurre limiti più stretti e
+  status code semantici (4xx/5xx), metriche Prometheus e logging strutturato.
+
+12) OpenAPI 3.1 – BACKEND ATTUALE (minimo, valido)
+--------------------------------------------------------------------------------
+openapi: 3.1.0
+info:
+  title: BrewChrome React Backend API (attuale)
+  version: "1.0"
+servers:
+  - url: http://localhost:8080
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  service: { type: string }
+                  version: { type: string }
+                  features:
+                    type: array
+                    items: { type: string }
+  /process:
+    post:
+      summary: Process a single image and return palette
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                image: { type: string, description: data URL o base64 }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image: { type: string, format: binary }
+      responses:
+        '200':
+          description: Always 200; success field indicates outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  palette:
+                    type: array
+                    items:
+                      type: array
+                      items: { type: integer, minimum: 0, maximum: 255 }
+                  error: { type: string }
+  /process_zip:
+    post:
+      summary: Process a ZIP of images (batch simplified)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                zip: { type: string, description: data URL o base64 ZIP }
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                zip_file: { type: string, format: binary }
+      responses:
+        '200':
+          description: Always 200; success field indicates outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  palette:
+                    type: array
+                    items:
+                      type: array
+                      items: { type: integer, minimum: 0, maximum: 255 }
+                  processed_count: { type: integer }
+                  total_files: { type: integer }
+                  error: { type: string }
+  /fetch_url:
+    post:
+      summary: Fetch an image from URL with SSRF protections
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                url: { type: string, format: uri }
+      responses:
+        '200':
+          description: Always 200; success field indicates outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  image: { type: string, description: data URL }
+                  content_type: { type: string }
+                  size_mb: { type: number }
+                  error: { type: string }
+
+================================================================================
+FINE DOCUMENTO – SPECIFICA FUNZIONALE (Backend attuale v1.0)
+================================================================================
+

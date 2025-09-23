@@ -2,6 +2,7 @@ import type {
   PaletteResponse,
   HealthResponse,
   FetchUrlResponse,
+  ZipProcessResponse,
 } from '../types';
 import { logger } from './logger';
 
@@ -83,7 +84,7 @@ export const api = {
     }
   },
 
-  async processZip(file: File): Promise<PaletteResponse> {
+  async processZip(file: File): Promise<ZipProcessResponse> {
     try {
       logger.fileProcessing('start ZIP', file.name, {
         size: file.size,
@@ -104,10 +105,22 @@ export const api = {
 
       const data = await response.json();
 
+      // Process results to fix format incompatibility
+      if (data.success && data.results) {
+        data.results = data.results.map((result: any) => ({
+          ...result,
+          palette: result.palette?.map((color: number[]) => ({
+            r: color[0],
+            g: color[1],
+            b: color[2],
+          })) || [],
+        }));
+      }
+
       if (data.success) {
         logger.info('API Success: ZIP processed', {
           fileName: file.name,
-          colorsCount: data.palette?.length,
+          resultsCount: data.results?.length,
         });
       } else {
         logger.warn('API Warning: ZIP processing failed', {
@@ -157,6 +170,34 @@ export const api = {
       return data;
     } catch (error) {
       logger.apiError('/fetch_url', error, { url });
+      throw error;
+    }
+  },
+
+  async processDataUrl(dataUrl: string): Promise<PaletteResponse> {
+    try {
+      logger.debug('API Call: process data URL');
+
+      const response = await fetch(`${API_BASE}/process`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ image: dataUrl }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      logger.info('API Success: process data URL', { 
+        success: data.success,
+        colorsCount: data.palette?.length 
+      });
+      return data;
+    } catch (error) {
+      logger.apiError('/process (data URL)', error);
       throw error;
     }
   },

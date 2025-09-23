@@ -3,35 +3,118 @@
 @tailwind utilities;
 
 @layer base {
-  :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222.2 84% 4.9%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96%;
-    --accent-foreground: 222.2 84% 4.9%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
-    --radius: 0.5rem;
+  * {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: white;
+    color: #111827;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-weight: normal;
+    margin: 0;
   }
 }
 
-@layer base {
-  * {
-    @apply border-border;
+@layer components {
+  /* Original BrewChrome styling - extremely minimal */
+  .original-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    font-size: 0.875rem;
+    font-weight: normal;
+    color: #374151;
+    background-color: transparent;
+    border: none;
+    cursor: pointer;
+    transition: color 150ms;
   }
-  body {
-    @apply bg-background text-foreground;
+
+  .original-button:hover:not(:disabled) {
+    color: #111827;
+  }
+
+  .original-button:disabled {
+    color: #9ca3af;
+    cursor: not-allowed;
+  }
+
+  /* Tab styles */
+  .tab-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 1rem 2rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #6b7280;
+    background-color: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    transition: all 150ms;
+    margin-bottom: -2px;
+  }
+
+  .tab-button:hover {
+    color: #374151;
+    border-bottom-color: #d1d5db;
+  }
+
+  .tab-button.active {
+    color: #111827;
+    border-bottom-color: #111827;
+  }
+
+  /* Upload area */
+  .upload-box {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    font-size: 0.875rem;
+    color: #374151;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    background-color: white;
+    cursor: pointer;
+    transition: colors 150ms;
+  }
+
+  .upload-box:hover {
+    color: #111827;
+    border-color: #d1d5db;
+  }
+
+  /* Console footer */
+  .console-footer {
+    font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Roboto Mono', monospace;
+    font-size: 0.75rem;
+    line-height: 1.25;
+    color: #6b7280;
+  }
+
+  /* Draggable carousel - keep existing */
+  .carousel-container {
+    display: flex;
+    gap: 1rem;
+    overflow-x: auto;
+    padding-bottom: 1rem;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .carousel-item {
+    flex-shrink: 0;
+    scroll-snap-align: start;
   }
 }

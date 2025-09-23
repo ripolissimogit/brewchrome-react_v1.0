@@ -11,6 +11,21 @@ export interface PaletteResponse {
   error?: string;
 }
 
+export interface ZipResult {
+  filename: string;
+  palette: Color[];
+  social_image: string;
+  error?: string;
+}
+
+export interface ZipProcessResponse {
+  success: boolean;
+  results?: ZipResult[];
+  error?: string;
+}
+
+export type TabType = 'files' | 'urls' | 'archive';
+
 export interface ProcessedImage {
   id: string;
   filename: string;
@@ -18,7 +33,7 @@ export interface ProcessedImage {
   palette: Color[];
   size: number;
   extension: string;
-  tab: 'files' | 'urls' | 'archive';
+  tab: TabType;
 }
 
 export interface HealthResponse {

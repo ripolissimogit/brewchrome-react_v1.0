@@ -1,0 +1,799 @@
+================================================================================
+                    SPECIFICA FUNZIONALE - SERVIZIO BREWCHROME
+                         Image Processing Backend Service
+                              Versione 1.0 - 23/09/2025
+================================================================================
+
+1. CONTESTO & SCOPO
+================================================================================
+
+DESCRIZIONE SERVIZIO:
+Servizio backend Flask per l'estrazione automatica di palette colori da immagini 
+singole, archivi ZIP e URL remoti. Ottimizzato per frontend React, utilizza 
+algoritmi ColorThief e smart cropping 3:2 per generare palette di 10 colori 
+dominanti con immagini social 1080x720px.
+
+UTENTI TARGET:
+- Frontend React tramite browser web
+- Script automatizzati per batch processing
+- Servizi terzi via API REST
+- Pipeline CI/CD per validazione asset
+
+CASI D'USO REALI:
+1. Designer carica screenshot per estrarre palette brand aziendale
+2. Batch processing di gallerie fotografiche tramite archivi ZIP
+3. Integrazione automatica con CMS per analisi colori contenuti
+4. Tool social media per generazione palette da URL immagini
+5. Pipeline CI/CD per validazione coerenza colori asset grafici
+
+2. API DI ALTO LIVELLO
+================================================================================
+
+ENDPOINT DISPONIBILI:
+
+GET /health
+- Scopo: Health check del servizio per monitoring
+- Quando: Load balancer checks, monitoring automatico
+- Prerequisiti: Nessuno
+- Response Time: <100ms
+
+POST /process  
+- Scopo: Elaborazione immagine singola
+- Quando: Upload da frontend, singola immagine
+- Prerequisiti: File immagine valido (PNG/JPG/JPEG/WebP)
+- Limiti: Max 50MB, 4M pixel
+
+POST /process_zip
+- Scopo: Elaborazione batch archivio ZIP
+- Quando: Batch processing multiple immagini
+- Prerequisiti: ZIP valido con immagini supportate
+- Limiti: Max 100MB, 50 immagini per archivio
+
+POST /fetch_url
+- Scopo: Elaborazione immagine da URL remoto
+- Quando: Integrazione con servizi esterni
+- Prerequisiti: URL pubblico HTTP/HTTPS accessibile
+- Limiti: Timeout 30s, max 50MB, no IP privati
+
+3. CONTRATTI RICHIESTA/RISPOSTA
+================================================================================
+
+3.1 GET /health
+---------------
+REQUEST:
+- Method: GET
+- Content-Type: N/A
+- Parameters: Nessuno
+
+RESPONSE:
+- Status: 200 OK
+- Content-Type: application/json
+- Body:
+  {
+    "status": "healthy",
+    "service": "brewchrome-react-backend",
+    "version": "1.0.0", 
+    "features": ["colorthief", "zip_processing", "react_optimized"]
+  }
+
+3.2 POST /process
+-----------------
+REQUEST MULTIPART:
+- Method: POST
+- Content-Type: multipart/form-data
+- Fields:
+  * image: File (required) - Immagine PNG/JPG/JPEG/WebP
+- Vincoli:
+  * Max size: 50MB
+  * Max pixels: 4M (auto-resize se superato)
+  * Formati: PNG, JPG, JPEG, WebP
+
+REQUEST JSON:
+- Method: POST  
+- Content-Type: application/json
+- Body:
+  {
+    "image": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."
+  }
+
+RESPONSE SUCCESS:
+- Status: 200 OK
+- Content-Type: application/json
+- Body:
+  {
+    "success": true,
+    "palette": [
+      [255, 0, 0],    // Rosso
+      [0, 255, 0],    // Verde  
+      [0, 0, 255],    // Blu
+      [128, 128, 128], // Grigio
+      [255, 255, 0],  // Giallo
+      [255, 0, 255],  // Magenta
+      [0, 255, 255],  // Ciano
+      [128, 0, 0],    // Marrone
+      [0, 128, 0],    // Verde scuro
+      [0, 0, 128]     // Blu scuro
+    ],
+    "social_image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."
+  }
+
+3.3 POST /process_zip
+---------------------
+REQUEST MULTIPART:
+- Method: POST
+- Content-Type: multipart/form-data  
+- Fields:
+  * zip_file: File (required) - Archivio ZIP
+
+REQUEST JSON:
+- Method: POST
+- Content-Type: application/json
+- Body:
+  {
+    "zip": "data:application/zip;base64,UEsDBBQAAAAIAA..."
+  }
+
+VINCOLI ZIP:
+- Max size totale: 100MB
+- Max immagini per archivio: 50
+- Estensioni supportate: .jpg, .jpeg, .png, .webp
+- Path traversal protection: attivo
+- Formati ZIP: Standard ZIP compression
+
+RESPONSE SUCCESS:
+- Status: 200 OK
+- Content-Type: application/json
+- Body:
+  {
+    "success": true,
+    "palette": [[255,0,0], [0,255,0], [0,0,255], ...],
+    "processed_count": 15,
+    "total_files": 20
+  }
+
+3.4 POST /fetch_url
+-------------------
+REQUEST:
+- Method: POST
+- Content-Type: application/json
+- Body:
+  {
+    "url": "https://example.com/image.jpg"
+  }
+
+VINCOLI URL:
+- Protocolli supportati: HTTP, HTTPS only
+- Timeout connessione: 30 secondi
+- Max dimensione download: 50MB
+- SSRF protection: blocco IP privati (10.x, 192.168.x, 127.x)
+- User-Agent: "BrewChrome-React/1.0"
+- Redirect: Max 5 redirect automatici
+
+RESPONSE SUCCESS:
+- Status: 200 OK
+- Content-Type: application/json
+- Body:
+  {
+    "success": true,
+    "image": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ...",
+    "content_type": "image/jpeg",
+    "size_mb": 2.45
+  }
+
+ESEMPIO CURL:
+curl -X POST https://brewchrome-backend.run.app/process \
+  -H "Content-Type: application/json" \
+  -d '{"image":"data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQ..."}'
+
+curl -X POST https://brewchrome-backend.run.app/fetch_url \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/test.jpg"}'
+
+4. ALGORITMO/PIPELINE DI ELABORAZIONE
+================================================================================
+
+4.1 SEQUENZA ELABORAZIONE IMMAGINE SINGOLA:
+--------------------------------------------
+Step 1: VALIDAZIONE INPUT
+- Controllo formato file (PNG/JPG/JPEG/WebP)
+- Verifica dimensioni file (<50MB)
+- Validazione header immagine
+
+Step 2: DECODIFICA
+- Base64 decode se necessario
+- Creazione PIL Image object
+- Verifica integrità immagine
+
+Step 3: PREPROCESSING  
+- Controllo dimensioni pixel (max 4M)
+- Auto-resize se necessario mantenendo aspect ratio
+- Algoritmo: Lanczos resampling per qualità ottimale
+
+Step 4: SMART CROP
+- Applicazione smart crop a ratio 3:2
+- Utilizzo libreria smartcrop.js per crop intelligente
+- Identificazione area di interesse principale
+
+Step 5: ESTRAZIONE COLORI
+- ColorThief con parametri quality=1
+- Estrazione max 20 colori candidati
+- Algoritmo: K-means clustering sui pixel
+
+Step 6: DEDUPLICAZIONE
+- Rimozione colori duplicati
+- Soglia similarità colori: Delta-E < 10
+
+Step 7: SELEZIONE FINALE
+- Selezione top 10 colori dominanti
+- Ordinamento per frequenza/dominanza
+
+Step 8: GENERAZIONE SOCIAL IMAGE
+- Creazione immagine 1080x720px
+- Layout: 75% immagine originale + 25% palette strip
+- Bordi uniformi 8px bianchi
+
+Step 9: ENCODING OUTPUT
+- Conversione palette a formato RGB array
+- Encoding social image a base64 PNG
+- Preparazione response JSON
+
+4.2 PARAMETRI E DEFAULT:
+------------------------
+- n_colors: 10 (colori finali)
+- quality: 1 (ColorThief - massima qualità)
+- max_pixels: 4,000,000 (4M pixel)
+- social_size: 1080x720px (ratio 3:2)
+- crop_ratio: 3:2 (standard social media)
+- resize_algorithm: Lanczos (alta qualità)
+- color_similarity_threshold: Delta-E < 10
+
+4.3 GESTIONE MULTIPLE IMMAGINI:
+-------------------------------
+- Elaborazione: Sequenziale (no parallelismo)
+- Ordinamento: Alfabetico per filename
+- Gestione errori: Skip immagine corrotta, continua con successive
+- Memory management: Cleanup automatico dopo ogni immagine
+
+4.4 IDEMPOTENZA:
+----------------
+SÌ - Stesso input produce sempre stesso output deterministico
+- Algoritmi deterministici utilizzati
+- Seed fissi per operazioni random
+- Cache-friendly per CDN
+
+5. ERRORI & CODICI DI STATO
+================================================================================
+
+TABELLA ERRORI COMPLETA:
+
+HTTP | Codice Interno    | Messaggio                           | Scenario
+-----|-------------------|-------------------------------------|---------------------------
+200  | SUCCESS           | "Processing completed"              | Elaborazione riuscita
+400  | NO_INPUT          | "No image data provided"            | Request senza dati
+400  | INVALID_BASE64    | "Base64 decode error"               | Encoding non valido
+400  | INVALID_URL       | "Invalid URL format"                | URL malformato
+400  | PRIVATE_IP        | "Private IP addresses not allowed"  | SSRF protection trigger
+400  | INVALID_FORMAT    | "Unsupported image format"          | Formato non supportato
+400  | INVALID_ZIP_PATH  | "Invalid file path in ZIP"          | Path traversal attempt
+408  | URL_TIMEOUT       | "Request timeout (30s)"             | Timeout fetch URL
+413  | FILE_TOO_LARGE    | "Image too large (max 50MB)"        | File supera limite
+413  | ZIP_TOO_LARGE     | "ZIP too large: exceeds 100MB"      | ZIP supera limite
+422  | INVALID_ZIP       | "Invalid ZIP file format"           | ZIP corrotto/non valido
+422  | TOO_MANY_IMAGES   | "Too many images: max 50 per ZIP"   | Troppi file in ZIP
+422  | PROCESSING_ERROR  | "Image processing failed"           | Errore algoritmo interno
+500  | INTERNAL_ERROR    | "Internal server error"             | Errore generico server
+502  | UPSTREAM_ERROR    | "Network error: connection failed"  | Errore fetch URL
+503  | SERVICE_UNAVAIL   | "Service temporarily unavailable"   | Overload/maintenance
+
+ESEMPI JSON ERRORE:
+
+Errore 400 - Input non valido:
+{
+  "success": false,
+  "error": "No image data provided",
+  "error_code": "NO_INPUT",
+  "timestamp": "2025-09-23T12:00:00Z",
+  "request_id": "req_abc123"
+}
+
+Errore 413 - File troppo grande:
+{
+  "success": false, 
+  "error": "Image too large (max 50MB)",
+  "error_code": "FILE_TOO_LARGE",
+  "file_size_mb": 75.2,
+  "max_allowed_mb": 50,
+  "timestamp": "2025-09-23T12:00:00Z"
+}
+
+Errore 408 - Timeout URL:
+{
+  "success": false,
+  "error": "Request timeout (30s)", 
+  "error_code": "URL_TIMEOUT",
+  "url": "https://slow-server.com/image.jpg",
+  "timeout_seconds": 30,
+  "timestamp": "2025-09-23T12:00:00Z"
+}
+
+6. SICUREZZA
+================================================================================
+
+6.1 LIMITI DIMENSIONI:
+-----------------------
+- File singolo: 50MB massimo
+- Archivio ZIP: 100MB massimo
+- Immagine pixel: 4M pixel (auto-resize se superato)
+- ZIP entries: massimo 50 immagini per archivio
+- URL download: 50MB massimo
+
+6.2 PROTEZIONI IMPLEMENTATE:
+----------------------------
+PATH TRAVERSAL:
+- Validazione rigorosa nomi file in ZIP
+- Blocco pattern "../", "..\\", path assoluti
+- Whitelist caratteri permessi in filename
+
+ZIP BOMB:
+- Limite decompressione 100MB
+- Controllo ratio compressione
+- Timeout decompressione 60 secondi
+
+SSRF (Server-Side Request Forgery):
+- Blocco IP privati: 10.x.x.x, 192.168.x.x, 127.x.x.x
+- Blocco localhost, 0.0.0.0
+- Whitelist protocolli: HTTP, HTTPS only
+- Validazione hostname prima di risoluzione DNS
+
+FORMATI PERICOLOSI:
+- Whitelist estensioni: .png, .jpg, .jpeg, .webp
+- Validazione magic bytes file header
+- Blocco file eseguibili, script
+
+MEMORY EXHAUSTION:
+- Auto-resize immagini >4M pixel
+- Cleanup automatico oggetti PIL
+- Limite memoria per processo
+
+6.3 RATE LIMITING:
+------------------
+Non implementato a livello applicazione (delegato a reverse proxy/CDN)
+Raccomandazioni per proxy:
+- 100 requests/minute per IP
+- 10 requests/second burst
+- 1GB/hour per IP per upload
+
+6.4 LOG SANITIZATION:
+---------------------
+- URL con token/password vengono mascherati
+- IP privati rimossi dai log pubblici
+- Filename sanitizzati per prevenire log injection
+
+7. PERFORMANCE & SCALABILITÀ
+================================================================================
+
+7.1 LIMITI CONSIGLIATI:
+------------------------
+- Immagini per richiesta ZIP: 10 (ottimale), 50 (massimo)
+- Dimensione totale per sessione: 500MB
+- Timeout elaborazione: 60 secondi per richiesta
+- Concurrent requests: 10 per istanza
+
+7.2 TEMPI STIMATI:
+------------------
+Immagine 1MB (1920x1080):     ~1-2 secondi
+Immagine 5MB (4000x3000):     ~3-4 secondi  
+Immagine 10MB (6000x4000):    ~5-7 secondi
+ZIP 5 immagini (20MB tot):    ~10-15 secondi
+ZIP 20 immagini (80MB tot):   ~30-45 secondi
+URL fetch + process:          +5-10 secondi
+
+7.3 MODALITÀ ASINCRONA:
+-----------------------
+ATTUALE: Tutte richieste sincrone
+RACCOMANDATO per v2.0: Implementare job queue per ZIP >20 immagini
+
+Pattern consigliato:
+POST /jobs → {"job_id": "job_abc123", "status": "queued"}
+GET /jobs/job_abc123 → {"status": "processing", "progress": 45}
+GET /jobs/job_abc123 → {"status": "completed", "results": [...]}
+
+7.4 POLITICA MEMORIA:
+---------------------
+- Elaborazione: Completamente in RAM
+- Storage temporaneo: Non utilizzato
+- Cleanup: Automatico dopo ogni richiesta
+- Cache: Nessuna cache persistente
+- Memory leak prevention: Context manager per PIL objects
+
+7.5 SCALING ORIZZONTALE:
+------------------------
+- Stateless: Nessuno stato condiviso tra istanze
+- Load balancer: Round-robin o least-connections
+- Auto-scaling: Basato su CPU >70% e memoria >80%
+- Container orchestration: Kubernetes/Docker Swarm ready
+
+8. OSSERVABILITÀ & OPERATIVITÀ
+================================================================================
+
+8.1 LOG MINIMI RICHIESTI:
+--------------------------
+LIVELLO INFO:
+2025-09-23T12:00:00Z INFO: Processing started - endpoint=/process, file=image.jpg, size=2.5MB, client_ip=192.168.1.100
+2025-09-23T12:00:03Z INFO: Processing completed - endpoint=/process, duration=3.2s, colors_extracted=10
+
+LIVELLO WARN:
+2025-09-23T12:00:00Z WARN: Large image auto-resized - file=huge.jpg, original=8000x6000, resized=2000x1500
+2025-09-23T12:00:00Z WARN: ZIP contains non-image files - zip=mixed.zip, skipped_files=5
+
+LIVELLO ERROR:
+2025-09-23T12:00:00Z ERROR: Processing failed - file=corrupt.jpg, error="cannot identify image file", client_ip=192.168.1.100
+2025-09-23T12:00:00Z ERROR: URL fetch failed - url=https://example.com/missing.jpg, error="404 Not Found"
+
+CAMPI LOG STANDARD:
+- timestamp: ISO 8601 format
+- level: INFO/WARN/ERROR
+- endpoint: API endpoint chiamato
+- duration: Tempo elaborazione in secondi
+- file_size: Dimensione file in MB
+- client_ip: IP client (mascherato se privato)
+- error: Messaggio errore dettagliato
+- request_id: ID univoco richiesta
+
+8.2 HEALTH CHECK (/health):
+----------------------------
+VERIFICHE ESEGUITE:
+✓ Flask application responsive
+✓ Import librerie core (PIL, ColorThief, smartcrop)
+✓ Memoria disponibile >100MB
+✓ Spazio disco temporaneo >1GB
+✓ Connettività rete (DNS resolution test)
+
+RESPONSE TIME TARGET: <100ms
+FAILURE THRESHOLD: 3 check consecutivi falliti
+
+8.3 READY CHECK (/ready):
+--------------------------
+VERIFICHE AGGIUNTIVE:
+✓ Database connections (se applicabile)
+✓ External dependencies reachable
+✓ Configuration loaded correctly
+✓ Warm-up completato
+
+8.4 METRICHE (DA IMPLEMENTARE):
+-------------------------------
+CONTATORI:
+- requests_total{endpoint, status, method}
+- errors_total{endpoint, error_type}
+- images_processed_total{format}
+
+HISTOGRAM:
+- processing_duration_seconds{endpoint}
+- file_size_bytes{endpoint}
+- image_pixels_total
+
+GAUGE:
+- active_requests_current
+- memory_usage_bytes
+- cpu_usage_percent
+
+METRICHE BUSINESS:
+- colors_extracted_avg
+- social_images_generated_total
+- zip_files_processed_total
+
+9. VERSIONING & COMPATIBILITÀ
+================================================================================
+
+9.1 VERSIONE CORRENTE:
+-----------------------
+API Version: v1.0.0
+Header: X-API-Version: 1.0
+Path: Nessun prefisso versione (default v1)
+
+9.2 COMPATIBILITÀ BACKWARD:
+----------------------------
+CAMBI COMPATIBILI (patch/minor):
+✓ Aggiunta nuovi campi response opzionali
+✓ Nuovi parametri request opzionali con default
+✓ Nuovi endpoint aggiuntivi
+✓ Miglioramenti performance senza cambio interfaccia
+
+CAMBI BREAKING (major):
+✗ Modifica formato palette (array vs object)
+✗ Rimozione campi response esistenti
+✗ Cambio tipo dati campi esistenti
+✗ Modifica semantica endpoint esistenti
+
+9.3 DEPRECATION POLICY:
+------------------------
+- Notice period: 6 mesi per breaking changes
+- Warning headers: X-Deprecated-Feature, X-Sunset-Date
+- Migration guide: Documentazione dettagliata
+- Overlap period: 3 mesi supporto doppia versione
+
+9.4 FUTURE ROADMAP:
+-------------------
+v1.1 (Q4 2025): Modalità asincrona per ZIP grandi
+v1.2 (Q1 2026): Cache intelligente risultati
+v2.0 (Q2 2026): Nuovo formato palette con metadata colori
+
+10. ACCETTAZIONE (DEFINITION OF DONE)
+================================================================================
+
+TEST OBBLIGATORI CHE DEVONO PASSARE:
+
+A1: JSON con 1 URL → 200 image/png
+------------------------------------
+PRECONDIZIONI:
+- URL pubblico con immagine JPG valida 2MB
+- Server remoto responsive <5s
+- Immagine dimensioni 1920x1080px
+
+REQUEST:
+POST /fetch_url
+Content-Type: application/json
+{
+  "url": "https://httpbin.org/image/jpeg"
+}
+
+RESPONSE ATTESA:
+Status: 200 OK
+Content-Type: application/json
+Body: {
+  "success": true,
+  "image": "data:image/jpeg;base64,/9j/4AAQ...",
+  "content_type": "image/jpeg", 
+  "size_mb": 2.1
+}
+
+VALIDAZIONI:
+✓ Response time <10 secondi
+✓ Base64 decodificabile
+✓ Immagine valida quando decodificata
+
+A2: Multipart 2 file → 200 con palette
+---------------------------------------
+PRECONDIZIONI:
+- 2 file JPG validi <5MB ciascuno
+- Immagini con colori distinti
+- Content-Type multipart/form-data corretto
+
+REQUEST:
+POST /process
+Content-Type: multipart/form-data
+Form field: image=file1.jpg (binary data)
+
+RESPONSE ATTESA:
+Status: 200 OK
+Content-Type: application/json
+Body: {
+  "success": true,
+  "palette": [
+    [255, 0, 0], [0, 255, 0], [0, 0, 255],
+    [128, 128, 128], [255, 255, 0], [255, 0, 255],
+    [0, 255, 255], [128, 0, 0], [0, 128, 0], [0, 0, 128]
+  ],
+  "social_image": "data:image/png;base64,iVBORw0KGgo..."
+}
+
+VALIDAZIONI:
+✓ Palette contiene esattamente 10 colori
+✓ Ogni colore è array [R,G,B] con valori 0-255
+✓ Social image è PNG 1080x720px valido
+
+A3: ZIP con 3 immagini → 200 con risultati
+-------------------------------------------
+PRECONDIZIONI:
+- ZIP valido 15MB con 3 JPG
+- Nessun path traversal nel ZIP
+- Immagini diverse con palette distinte
+
+REQUEST:
+POST /process_zip
+Content-Type: application/json
+{
+  "zip": "data:application/zip;base64,UEsDBBQAAAAIAA..."
+}
+
+RESPONSE ATTESA:
+Status: 200 OK
+Content-Type: application/json
+Body: {
+  "success": true,
+  "palette": [[255,0,0], [0,255,0], [0,0,255], ...],
+  "processed_count": 3,
+  "total_files": 3
+}
+
+VALIDAZIONI:
+✓ processed_count = total_files = 3
+✓ Palette derivata da prima immagine processata
+✓ Response time <20 secondi
+
+A4: Nessun input → 400
+-----------------------
+PRECONDIZIONI:
+- Request body vuoto o malformato
+- Content-Type corretto ma dati mancanti
+
+REQUEST:
+POST /process
+Content-Type: application/json
+{}
+
+RESPONSE ATTESA:
+Status: 400 Bad Request
+Content-Type: application/json
+Body: {
+  "success": false,
+  "error": "No image data provided",
+  "error_code": "NO_INPUT",
+  "timestamp": "2025-09-23T12:00:00Z"
+}
+
+VALIDAZIONI:
+✓ Status code esatto 400
+✓ Messaggio errore chiaro e specifico
+✓ Campo success = false presente
+
+A5: URL timeout → 408
+----------------------
+PRECONDIZIONI:
+- URL che non risponde entro 30 secondi
+- Server remoto irraggiungibile o lento
+
+REQUEST:
+POST /fetch_url
+Content-Type: application/json
+{
+  "url": "https://httpbin.org/delay/35"
+}
+
+RESPONSE ATTESA:
+Status: 408 Request Timeout
+Content-Type: application/json
+Body: {
+  "success": false,
+  "error": "Request timeout (30s)",
+  "error_code": "URL_TIMEOUT",
+  "timeout_seconds": 30,
+  "timestamp": "2025-09-23T12:00:00Z"
+}
+
+VALIDAZIONI:
+✓ Timeout esatto a 30 secondi
+✓ Status code 408 (non 500)
+✓ Messaggio include timeout configurato
+
+A6: ZIP path traversal → 400
+-----------------------------
+PRECONDIZIONI:
+- ZIP contenente entry con "../../../etc/passwd"
+- ZIP altrimenti valido con immagini
+
+REQUEST:
+POST /process_zip
+Content-Type: application/json
+{
+  "zip": "data:application/zip;base64,<malicious_zip_base64>"
+}
+
+RESPONSE ATTESA:
+Status: 400 Bad Request
+Content-Type: application/json
+Body: {
+  "success": false,
+  "error": "Invalid file path in ZIP",
+  "error_code": "INVALID_ZIP_PATH",
+  "timestamp": "2025-09-23T12:00:00Z"
+}
+
+VALIDAZIONI:
+✓ Rilevamento path traversal
+✓ Nessun file estratto su filesystem
+✓ Errore specifico per sicurezza
+
+A7: Immagine troppo grande → 413
+---------------------------------
+PRECONDIZIONI:
+- File immagine 60MB (supera limite 50MB)
+- Formato valido ma dimensioni eccessive
+
+REQUEST:
+POST /process
+Content-Type: application/json
+{
+  "image": "data:image/jpeg;base64,<large_image_base64>"
+}
+
+RESPONSE ATTESA:
+Status: 413 Payload Too Large
+Content-Type: application/json
+Body: {
+  "success": false,
+  "error": "Image too large (max 50MB)",
+  "error_code": "FILE_TOO_LARGE",
+  "file_size_mb": 60.2,
+  "max_allowed_mb": 50,
+  "timestamp": "2025-09-23T12:00:00Z"
+}
+
+VALIDAZIONI:
+✓ Status code 413 (non 400)
+✓ Dimensioni file riportate correttamente
+✓ Limite massimo specificato nel messaggio
+
+11. ASSUNZIONI & RISCHI
+================================================================================
+
+11.1 ASSUNZIONI FATTE:
+-----------------------
+FRONTEND REACT:
+- Gestisce validazione client-side per UX
+- Implementa retry logic per errori temporanei
+- Mostra progress indicator per operazioni lunghe
+
+INFRASTRUTTURA:
+- Reverse proxy gestisce rate limiting
+- CDN/Load balancer gestisce SSL termination
+- Container orchestration per scaling automatico
+
+UTILIZZO:
+- Utenti caricano principalmente foto/screenshot
+- Non artwork complessi o immagini scientifiche
+- Uso prevalente per design/marketing
+
+STORAGE:
+- Nessun storage persistente necessario
+- Elaborazione completamente in memoria
+- Risultati consumati immediatamente dal client
+
+11.2 RISCHI IDENTIFICATI E MITIGAZIONI:
+---------------------------------------
+RISCHIO: Memory exhaustion da immagini enormi
+MITIGAZIONE: Auto-resize >4M pixel, cleanup automatico PIL objects
+
+RISCHIO: ZIP bomb attacks
+MITIGAZIONE: Limite decompressione 100MB, timeout 60s, ratio check
+
+RISCHIO: SSRF attacks via URL malicious
+MITIGAZIONE: Whitelist protocolli, blocco IP privati, DNS validation
+
+RISCHIO: Processing timeout su ZIP grandi
+MITIGAZIONE: Timeout 60s per richiesta, modalità asincrona per v2.0
+
+RISCHIO: Concurrent load overwhelming
+MITIGAZIONE: Scaling orizzontale, load balancing, circuit breaker
+
+RISCHIO: Dependency vulnerabilities
+MITIGAZIONE: Automated security scanning, regular updates
+
+RISCHIO: Disk space exhaustion
+MITIGAZIONE: No storage temporaneo, elaborazione in-memory only
+
+11.3 ALTERNATIVE DI DESIGN:
+----------------------------
+ALTERNATIVA 1: Modalità asincrona con job queue
+PRO: Gestisce ZIP grandi, migliore UX, scalabilità
+CONTRO: Complessità implementazione, storage stato job
+RACCOMANDAZIONE: Implementare in v2.0 per ZIP >20 immagini
+
+ALTERNATIVA 2: Cache risultati elaborazione
+PRO: Performance migliori, riduzione carico CPU
+CONTRO: Complessità cache invalidation, storage requirements
+RACCOMANDAZIONE: Valutare in v1.2 con Redis
+
+ALTERNATIVA 3: Microservizi separati per ogni funzione
+PRO: Scaling indipendente, fault isolation
+CONTRO: Complessità deployment, latenza inter-service
+RACCOMANDAZIONE: Mantenere monolite per v1.x
+
+SCELTA ATTUALE: Servizio monolitico sincrono
+MOTIVAZIONE: Semplicità deployment, latenza minima, requirements attuali soddisfatti
+
+================================================================================
+                                FINE REPORT
+                    Generato il: 23 Settembre 2025, 14:00 CET
+                         Versione Documento: 1.0
+================================================================================
