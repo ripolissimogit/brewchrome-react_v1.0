@@ -8,6 +8,21 @@ import { logger } from './logger';
 
 const API_BASE = 'https://brewchrome-backend-736130833520.us-central1.run.app';
 
+function getErrorMessage(status: number, data: any): string {
+  if (data?.message) return data.message;
+  
+  switch (status) {
+    case 400: return 'Input non valido';
+    case 413: return 'File troppo grande, limite 50MB';
+    case 415: return 'Formato file non supportato';
+    case 422: return 'Formato non valido o immagine corrotta';
+    case 408: return 'Timeout durante download, riprova';
+    case 500:
+    case 502: return 'Errore server, riprova più tardi';
+    default: return 'Errore sconosciuto';
+  }
+}
+
 export const api = {
   async health(): Promise<HealthResponse> {
     try {
@@ -70,11 +85,17 @@ export const api = {
         body: JSON.stringify({ image: base64 }),
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
       const data = await response.json();
+
+      if (!response.ok) {
+        const errorMsg = getErrorMessage(response.status, data);
+        logger.error('API Error: process image', { 
+          status: response.status, 
+          error_code: data.error_code,
+          message: data.message 
+        });
+        throw new Error(errorMsg);
+      }
 
       // Fix format incompatibility: backend returns [[r,g,b]] arrays
       if (data.success && data.palette) {

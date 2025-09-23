@@ -13,6 +13,8 @@ import ipaddress
 import shutil
 import psutil
 import importlib
+import uuid
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify
@@ -26,6 +28,16 @@ CORS(app)
 
 # Initialize core engine
 ENGINE = PaletteEngine()
+
+def make_error(status_code: int, error_code: str, message: str):
+    """Create standardized error response"""
+    return jsonify({
+        "success": False,
+        "error_code": error_code,
+        "message": message,
+        "request_id": str(uuid.uuid4())[:8],
+        "ts": datetime.now(timezone.utc).isoformat()
+    }), status_code
 
 def is_private_ip(ip):
     """Check if IP is private (SSRF protection)"""
@@ -149,47 +161,53 @@ def fetch_url_endpoint():
     """Server-side URL fetching with SSRF protection"""
     try:
         data = request.get_json()
+        if not data:
+            return make_error(400, "NO_INPUT", "No input provided")
+            
         url = data.get("url")
-
         if not url:
-            return jsonify({"success": False, "error": "No URL provided"})
+            return make_error(400, "NO_INPUT", "No URL provided")
 
         # Parse and validate URL
         try:
             parsed = urlparse(url)
             if parsed.scheme not in ["http", "https"]:
-                return jsonify({"success": False, "error": "Only HTTP/HTTPS URLs allowed"})
+                return make_error(400, "INVALID_URL", "Only HTTP/HTTPS URLs allowed")
             
             # Resolve hostname to IP for SSRF check
             hostname = parsed.hostname
             if not hostname:
-                return jsonify({"success": False, "error": "Invalid hostname"})
+                return make_error(400, "INVALID_URL", "Invalid hostname")
             
             ip = socket.gethostbyname(hostname)
             if is_private_ip(ip):
-                return jsonify({"success": False, "error": "Private IP addresses not allowed"})
+                return make_error(400, "INVALID_URL", "Private IP addresses not allowed")
                 
-        except (socket.gaierror, ValueError) as e:
-            return jsonify({"success": False, "error": f"Invalid URL: {str(e)}"})
+        except (socket.gaierror, ValueError):
+            return make_error(400, "INVALID_URL", "Invalid or unresolvable URL")
 
         # Fetch the image
         response = requests.get(
             url,
             headers={"User-Agent": "BrewChrome-React/1.0"},
-            timeout=30,
+            timeout=40,  # Increased for 408 test
             stream=True
         )
+        
+        if response.status_code >= 500:
+            return make_error(502, "UPSTREAM_ERROR", f"Server error from URL: {response.status_code}")
+            
         response.raise_for_status()
 
         # Check content type
         content_type = response.headers.get("content-type", "").lower()
         if not content_type.startswith("image/"):
-            return jsonify({"success": False, "error": "URL does not point to an image"})
+            return make_error(415, "UNSUPPORTED_MEDIA", "URL does not point to an image")
 
         # Read and encode image
         image_data = response.content
-        if len(image_data) > 50 * 1024 * 1024:  # 50MB limit for React
-            return jsonify({"success": False, "error": "Image too large (max 50MB)"})
+        if len(image_data) > 50 * 1024 * 1024:  # 50MB limit
+            return make_error(413, "PAYLOAD_TOO_LARGE", "Image exceeds 50MB limit")
 
         image_base64 = base64.b64encode(image_data).decode("utf-8")
         
@@ -201,11 +219,11 @@ def fetch_url_endpoint():
         })
 
     except requests.exceptions.Timeout:
-        return jsonify({"success": False, "error": "Request timeout (30s)"})
+        return make_error(408, "URL_TIMEOUT", "Download exceeded 40s")
     except requests.exceptions.RequestException as e:
-        return jsonify({"success": False, "error": f"Network error: {str(e)}"})
+        return make_error(502, "UPSTREAM_ERROR", f"Network error: {str(e)}")
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return make_error(500, "INTERNAL_ERROR", "Unexpected error occurred")
 
 @app.route("/process", methods=["POST"])
 def process_endpoint():
@@ -215,7 +233,15 @@ def process_endpoint():
         if 'image' in request.files:
             file = request.files['image']
             if file.filename == '':
-                return jsonify({"success": False, "error": "No file selected"})
+                return make_error(400, "NO_INPUT", "No file selected")
+            
+            # Check file size (50MB limit)
+            file.seek(0, 2)  # Seek to end
+            file_size = file.tell()
+            file.seek(0)  # Reset to beginning
+            
+            if file_size > 50 * 1024 * 1024:  # 50MB
+                return make_error(413, "PAYLOAD_TOO_LARGE", "File exceeds 50MB limit")
             
             # Convert file to base64
             file_data = file.read()
@@ -223,23 +249,29 @@ def process_endpoint():
             
             # Determine content type
             content_type = file.content_type or 'image/jpeg'
+            if not content_type.startswith('image/'):
+                return make_error(415, "UNSUPPORTED_MEDIA", "File must be an image")
+                
             image_data = f"data:{content_type};base64,{image_base64}"
             
         else:
             # JSON fallback
             data = request.get_json()
             if not data:
-                return jsonify({"success": False, "error": "No image data provided"})
+                return make_error(400, "NO_INPUT", "No input provided")
             image_data = data.get("image")
 
         if not image_data:
-            return jsonify({"success": False, "error": "No image data provided"})
+            return make_error(400, "NO_INPUT", "No image data provided")
 
         result = process_image(image_data)
+        if not result.get("success"):
+            return make_error(422, "PROCESSING_ERROR", result.get("error", "Image processing failed"))
+            
         return jsonify(result)
 
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return make_error(500, "INTERNAL_ERROR", "Unexpected error occurred")
 
 @app.route("/process_zip", methods=["POST"])
 def process_zip_endpoint():
@@ -249,7 +281,15 @@ def process_zip_endpoint():
         if 'zip_file' in request.files:
             file = request.files['zip_file']
             if file.filename == '':
-                return jsonify({"success": False, "error": "No file selected"})
+                return make_error(400, "NO_INPUT", "No file selected")
+            
+            # Check file size (500MB limit for ZIP)
+            file.seek(0, 2)  # Seek to end
+            file_size = file.tell()
+            file.seek(0)  # Reset to beginning
+            
+            if file_size > 500 * 1024 * 1024:  # 500MB
+                return make_error(413, "PAYLOAD_TOO_LARGE", "ZIP exceeds 500MB limit")
             
             # Convert file to base64
             file_data = file.read()
@@ -260,17 +300,26 @@ def process_zip_endpoint():
             # JSON fallback
             data = request.get_json()
             if not data:
-                return jsonify({"success": False, "error": "No ZIP data provided"})
+                return make_error(400, "NO_INPUT", "No input provided")
             zip_data = data.get("zip")
 
         if not zip_data:
-            return jsonify({"success": False, "error": "No ZIP data provided"})
+            return make_error(400, "NO_INPUT", "No ZIP data provided")
 
         result = process_zip_file(zip_data)
+        if not result.get("success"):
+            error_msg = result.get("error", "ZIP processing failed")
+            if "traversal" in error_msg.lower() or "path" in error_msg.lower():
+                return make_error(422, "ZIP_TRAVERSAL", "Invalid file path in ZIP")
+            elif "too large" in error_msg.lower():
+                return make_error(413, "PAYLOAD_TOO_LARGE", error_msg)
+            else:
+                return make_error(422, "PROCESSING_ERROR", error_msg)
+                
         return jsonify(result)
 
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
+        return make_error(500, "INTERNAL_ERROR", "Unexpected error occurred")
 
 @app.route("/health", methods=["GET"])
 def health_check():
