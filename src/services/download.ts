@@ -4,6 +4,11 @@ import { logger } from './logger';
 
 export const downloadService = {
   downloadImage(dataUrl: string, filename: string) {
+    if (!dataUrl || dataUrl.trim() === '') {
+      logger.warn('Download failed: no image data', { filename });
+      throw new Error('Download not available - no image data');
+    }
+
     const link = document.createElement('a');
     link.href = dataUrl;
     link.download = `palette-${filename}`;
@@ -17,7 +22,17 @@ export const downloadService = {
   async downloadAllAsZip(images: ProcessedImage[]) {
     if (images.length === 0) {
       logger.warn('No images to download');
-      return;
+      throw new Error('No images to download');
+    }
+
+    // Check if any images are missing socialImage
+    const imagesWithoutData = images.filter(img => !img.socialImage || img.socialImage.trim() === '');
+    if (imagesWithoutData.length > 0) {
+      logger.warn('Some images missing data', { 
+        missing: imagesWithoutData.length,
+        total: images.length 
+      });
+      throw new Error(`${imagesWithoutData.length} images missing data - download not available`);
     }
 
     // Single image - download directly

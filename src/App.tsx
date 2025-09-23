@@ -7,6 +7,7 @@ import { LoadingSpinner } from './components/LoadingSpinner';
 import { ErrorMessage } from './components/ErrorMessage';
 import { ConsoleFooter } from './components/ConsoleFooter';
 import { api } from './services/api';
+import { downloadService } from './services/download';
 import { logger } from './services/logger';
 import type { ProcessedImage, TabType } from './types';
 
@@ -40,6 +41,14 @@ function App() {
     try {
       const results = await Promise.all(
         files.map(async (file) => {
+          // Convert file to data URL for fallback
+          const originalImageDataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = reject;
+            reader.readAsDataURL(file);
+          });
+
           const result = await api.processImage(file);
           return {
             id: `${Date.now()}-${Math.random()}`,
@@ -48,7 +57,7 @@ function App() {
             extension: file.name.split('.').pop() || '',
             tab: 'files' as const,
             palette: result.palette || [],
-            socialImage: result.social_image || '',
+            socialImage: result.social_image || originalImageDataUrl,
           } as ProcessedImage;
         })
       );
@@ -161,6 +170,18 @@ function App() {
     }
   };
 
+  const handleDownloadAll = async () => {
+    const filteredImages = images.filter(img => img.tab === activeTab);
+    
+    try {
+      await downloadService.downloadAllAsZip(filteredImages);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Download failed';
+      setError(message);
+      logger.error('Download failed', { error: message });
+    }
+  };
+
   const handleZipUpload = async (file: File) => {
     setLoading(true);
     setError(null);
@@ -176,7 +197,7 @@ function App() {
           extension: zipResult.filename.split('.').pop() || '',
           tab: 'archive' as const,
           palette: zipResult.palette || [],
-          socialImage: zipResult.social_image || '',
+          socialImage: zipResult.social_image || 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjZjNmNGY2Ii8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJBcmlhbCIgZm9udC1zaXplPSIxNCIgZmlsbD0iIzk5YTNhZiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPkltYWdlPC90ZXh0Pjwvc3ZnPg==', // Placeholder SVG
         }));
 
         setImages((prev) => [...prev, ...processedImages]);
@@ -253,7 +274,7 @@ function App() {
               <Gallery
                 images={images.filter(img => img.tab === activeTab)}
                 onImageClick={(index: number) => setModalIndex(index)}
-                onDownloadAll={() => {}}
+                onDownloadAll={handleDownloadAll}
                 onClearAll={() => setImages([])}
               />
             </div>
