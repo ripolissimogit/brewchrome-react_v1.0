@@ -2,6 +2,15 @@
 
 All notable changes to BrewChrome React will be documented in this file.
 
+## [1.1.2] - 2025-09-23
+
+### 🐛 Bug Fixes
+- **Fixed** File status tracking in multi-file upload UI
+- **Fixed** Files remaining "queued" after successful processing
+- **Added** Real-time status updates with color coding (queued/uploading/completed/failed)
+- **Added** Auto-clear file list after 2 seconds showing completed status
+- **Improved** Visual feedback for individual file processing states
+
 ## [1.1.1] - 2025-09-23
 
 ### ✨ Enhanced User Experience
