@@ -18,6 +18,7 @@ function App() {
   const [modalIndex, setModalIndex] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>('files');
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [fileStatuses, setFileStatuses] = useState<Record<string, 'queued' | 'uploading' | 'completed' | 'failed'>>({});
   const [backendStatus, setBackendStatus] = useState(false);
   const [urlInput, setUrlInput] = useState<string>('');
 
@@ -41,33 +42,54 @@ function App() {
     try {
       const results = await Promise.all(
         files.map(async (file) => {
-          const result = await api.processImage(file);
+          const fileKey = `${file.name}-${file.size}`;
           
-          // Fallback to original image only if backend doesn't provide social_image
-          let socialImage = result.social_image;
-          if (!socialImage) {
-            const originalImageDataUrl = await new Promise<string>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(reader.result as string);
-              reader.onerror = reject;
-              reader.readAsDataURL(file);
-            });
-            socialImage = originalImageDataUrl;
-          }
+          try {
+            // Update status to uploading
+            setFileStatuses(prev => ({ ...prev, [fileKey]: 'uploading' }));
+            
+            const result = await api.processImage(file);
+            
+            // Fallback to original image only if backend doesn't provide social_image
+            let socialImage = result.social_image;
+            if (!socialImage) {
+              const originalImageDataUrl = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result as string);
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              });
+              socialImage = originalImageDataUrl;
+            }
 
-          return {
-            id: `${Date.now()}-${Math.random()}`,
-            filename: file.name,
-            size: file.size,
-            extension: file.name.split('.').pop() || '',
-            tab: 'files' as const,
-            palette: result.palette || [],
-            socialImage,
-          } as ProcessedImage;
+            // Update status to completed
+            setFileStatuses(prev => ({ ...prev, [fileKey]: 'completed' }));
+
+            return {
+              id: `${Date.now()}-${Math.random()}`,
+              filename: file.name,
+              size: file.size,
+              extension: file.name.split('.').pop() || '',
+              tab: 'files' as const,
+              palette: result.palette || [],
+              socialImage,
+            } as ProcessedImage;
+          } catch (err) {
+            // Update status to failed
+            setFileStatuses(prev => ({ ...prev, [fileKey]: 'failed' }));
+            throw err;
+          }
         })
       );
 
       setImages((prev) => [...prev, ...results]);
+      
+      // Clear selected files after successful processing
+      setTimeout(() => {
+        setSelectedFiles([]);
+        setFileStatuses({});
+      }, 2000); // Show completed status for 2 seconds
+      
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Upload failed';
       setError(message);
@@ -140,6 +162,15 @@ function App() {
 
     if (validFiles.length > 0) {
       setSelectedFiles(prev => [...prev, ...validFiles]);
+      
+      // Initialize file statuses as queued
+      const newStatuses: Record<string, 'queued'> = {};
+      validFiles.forEach(file => {
+        const fileKey = `${file.name}-${file.size}`;
+        newStatuses[fileKey] = 'queued';
+      });
+      setFileStatuses(prev => ({ ...prev, ...newStatuses }));
+      
       logger.info('Files selected', { count: validFiles.length, tab: activeTab });
     }
   };
@@ -165,6 +196,7 @@ function App() {
 
   const handleClearFiles = () => {
     setSelectedFiles([]);
+    setFileStatuses({});
     setError(null);
     logger.info('Files cleared');
   };
@@ -297,6 +329,7 @@ function App() {
             onUrlChange={setUrlInput}
             onProcessClick={handleProcessUrl}
             selectedFiles={selectedFiles}
+            fileStatuses={fileStatuses}
           />
 
           {/* Loading State */}
