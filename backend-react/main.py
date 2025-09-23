@@ -14,30 +14,134 @@ import shutil
 import psutil
 import importlib
 import uuid
+import time
+import json
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
+import structlog
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from flask_cors import CORS
 
 # Import core engine
 from core.palette_engine import PaletteEngine
 
+# Global setup
+START_TIME = time.time()
+
+# Configure structlog for JSON output
+structlog.configure(
+    processors=[
+        structlog.processors.TimeStamper(fmt="iso", key="ts"),
+        structlog.processors.add_log_level,
+        structlog.processors.dict_tracebacks,
+        structlog.processors.JSONRenderer()
+    ],
+    wrapper_class=structlog.make_filtering_bound_logger(20),  # INFO
+    context_class=dict,
+    cache_logger_on_first_use=True,
+)
+logger = structlog.get_logger()
+
+# Prometheus metrics
+REQUESTS_TOTAL = Counter("requests_total", "HTTP requests total", ["endpoint", "code"])
+REQUEST_DURATION = Histogram("request_duration_ms", "Request duration in ms", ["endpoint"], buckets=[50,100,200,500,1000,2000,5000,10000])
+IMAGES_PROCESSED_TOTAL = Counter("images_processed_total", "Total images processed", ["endpoint"])
+ERRORS_TOTAL = Counter("errors_total", "Errors total", ["endpoint", "error_code"])
+
 app = Flask(__name__)
 CORS(app)
+
+@app.before_request
+def _before():
+    g._start = time.time()
+    rid = request.headers.get("X-Request-Id")
+    if not rid:
+        rid = uuid.uuid4().hex[:8]
+    g.request_id = rid
+    g.endpoint_label = request.path
+    
+    # bytes in
+    try:
+        g.bytes_in = int(request.headers.get("Content-Length", "0"))
+    except Exception:
+        g.bytes_in = 0
+
+@app.after_request
+def _after(resp):
+    try:
+        duration_ms = int((time.time() - getattr(g, "_start", time.time())) * 1000)
+        code = resp.status_code
+        endpoint = getattr(g, "endpoint_label", request.path)
+        
+        REQUESTS_TOTAL.labels(endpoint=endpoint, code=str(code)).inc()
+        REQUEST_DURATION.labels(endpoint=endpoint).observe(duration_ms)
+        
+        # bytes out
+        bytes_out = 0
+        try:
+            bytes_out = int(resp.headers.get("Content-Length", "0"))
+        except Exception:
+            pass
+            
+        # success flag
+        success = None
+        error_code = None
+        try:
+            if resp.mimetype == "application/json" and resp.get_data():
+                payload = json.loads(resp.get_data(as_text=True))
+                success = payload.get("success")
+                error_code = payload.get("error_code")
+        except Exception:
+            pass
+            
+        # structured log
+        logger.info(
+            "http_request",
+            request_id=getattr(g, "request_id", None),
+            endpoint=endpoint,
+            method=request.method,
+            status_code=code,
+            duration_ms=duration_ms,
+            success=success,
+            error_code=error_code,
+            bytes_in=getattr(g, "bytes_in", 0),
+            bytes_out=bytes_out
+        )
+        
+        # propagate request id
+        resp.headers["X-Request-Id"] = getattr(g, "request_id", "")
+        
+    except Exception as e:
+        logger.error("after_request_error", error=str(e))
+        
+    return resp
 
 # Initialize core engine
 ENGINE = PaletteEngine()
 
 def make_error(status_code: int, error_code: str, message: str):
-    """Create standardized error response"""
-    return jsonify({
+    """Create standardized error response with metrics and logging"""
+    rid = getattr(g, "request_id", None) or uuid.uuid4().hex[:8]
+    payload = {
         "success": False,
         "error_code": error_code,
         "message": message,
-        "request_id": str(uuid.uuid4())[:8],
+        "request_id": rid,
         "ts": datetime.now(timezone.utc).isoformat()
-    }), status_code
+    }
+    
+    # Metrics
+    endpoint = getattr(g, "endpoint_label", request.path)
+    ERRORS_TOTAL.labels(endpoint=endpoint, error_code=error_code).inc()
+    
+    # Log error
+    logger.error("http_error", request_id=rid, endpoint=endpoint, status_code=status_code, error_code=error_code, message=message)
+    
+    resp = jsonify(payload)
+    resp.status_code = status_code
+    return resp
 
 def is_private_ip(ip):
     """Check if IP is private (SSRF protection)"""
@@ -267,7 +371,10 @@ def process_endpoint():
         result = process_image(image_data)
         if not result.get("success"):
             return make_error(422, "PROCESSING_ERROR", result.get("error", "Image processing failed"))
-            
+        
+        # Count successful image processing
+        IMAGES_PROCESSED_TOTAL.labels(endpoint="/process").inc()
+        
         return jsonify(result)
 
     except Exception as e:
@@ -315,11 +422,22 @@ def process_zip_endpoint():
                 return make_error(413, "PAYLOAD_TOO_LARGE", error_msg)
             else:
                 return make_error(422, "PROCESSING_ERROR", error_msg)
+        
+        # Count processed images in ZIP
+        processed_count = result.get("processed_count", 0)
+        if processed_count > 0:
+            IMAGES_PROCESSED_TOTAL.labels(endpoint="/process_zip").inc(processed_count)
                 
         return jsonify(result)
 
     except Exception as e:
         return make_error(500, "INTERNAL_ERROR", "Unexpected error occurred")
+
+@app.route("/metrics", methods=["GET"])
+def metrics():
+    """Prometheus metrics endpoint"""
+    data = generate_latest()
+    return data, 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
 @app.route("/health", methods=["GET"])
 def health_check():
@@ -329,6 +447,7 @@ def health_check():
         "service": "brewchrome-react-backend",
         "version": "1.0.0",
         "features": ["colorthief", "zip_processing", "react_optimized"],
+        "uptime_seconds": int(time.time() - START_TIME)
     })
 
 @app.route("/ready", methods=["GET"])
@@ -361,7 +480,13 @@ def ready():
     ready = all(deps.values())
     status_code = 200 if ready else 503
 
-    return jsonify({"ready": ready, "dependencies": deps}), status_code
+    return jsonify({
+        "ready": ready, 
+        "dependencies": deps,
+        "uptime_seconds": int(time.time() - START_TIME),
+        "active_requests": 0,
+        "error_rate_last_5m": None
+    }), status_code
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))

@@ -23,6 +23,10 @@ function getErrorMessage(status: number, data: any): string {
   }
 }
 
+function generateRequestId(): string {
+  return crypto.randomUUID().slice(0, 8);
+}
+
 export const api = {
   async health(): Promise<HealthResponse> {
     try {
@@ -63,10 +67,13 @@ export const api = {
   },
 
   async processImage(file: File): Promise<PaletteResponse> {
+    const requestId = generateRequestId();
+    
     try {
       logger.fileProcessing('start', file.name, {
         size: file.size,
         type: file.type,
+        request_id: requestId,
       });
 
       // Convert file to base64
@@ -81,6 +88,7 @@ export const api = {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Request-Id': requestId,
         },
         body: JSON.stringify({ image: base64 }),
       });
@@ -92,9 +100,10 @@ export const api = {
         logger.error('API Error: process image', { 
           status: response.status, 
           error_code: data.error_code,
-          message: data.message 
+          message: data.message,
+          request_id: requestId,
         });
-        throw new Error(errorMsg);
+        throw new Error(`${errorMsg} — id ${requestId}`);
       }
 
       // Fix format incompatibility: backend returns [[r,g,b]] arrays
@@ -178,22 +187,32 @@ export const api = {
   },
 
   async fetchUrl(url: string): Promise<FetchUrlResponse> {
+    const requestId = generateRequestId();
+    
     try {
-      logger.debug('API Call: fetch URL', { url });
+      logger.debug('API Call: fetch URL', { url, request_id: requestId });
 
       const response = await fetch(`${API_BASE}/fetch_url`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
+          'X-Request-Id': requestId,
         },
         body: JSON.stringify({ url }),
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
       const data = await response.json();
+
+      if (!response.ok) {
+        const errorMsg = getErrorMessage(response.status, data);
+        logger.error('API Error: fetch URL', { 
+          status: response.status, 
+          error_code: data.error_code,
+          message: data.message,
+          request_id: requestId,
+        });
+        throw new Error(`${errorMsg} — id ${requestId}`);
+      }
 
       if (data.success) {
         logger.info('API Success: URL fetched', {
