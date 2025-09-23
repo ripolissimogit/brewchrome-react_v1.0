@@ -294,7 +294,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-white pb-20">
-      <div className="max-w-6xl mx-auto px-6 py-12">
+      <div className="max-w-[1080px] mx-auto px-6 py-12">
         {/* Header */}
         <header className="text-center mb-16">
           <h1 className="text-lg font-normal text-gray-900 mb-2">
