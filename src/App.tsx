@@ -76,17 +76,17 @@ function App() {
     }
   };
 
-  const handleFileSelect = (file: File) => {
-    // Validate file type based on active tab
+  const handleFileSelect = (files: File[]) => {
+    // Validate files based on active tab
     const validateFile = (file: File, tab: TabType) => {
       const isImage = file.type.startsWith('image/');
       const isZip = file.type === 'application/zip' || file.name.toLowerCase().endsWith('.zip');
 
       if (tab === 'files' && !isImage) {
-        return 'Please select an image file for Files tab';
+        return `Invalid file type: ${file.name}. Please select image files for Files tab`;
       }
       if (tab === 'archive' && !isZip) {
-        return 'Please select a ZIP archive for Archive tab';
+        return `Invalid file type: ${file.name}. Please select a ZIP archive for Archive tab`;
       }
 
       // File size validation (max 30MB)
@@ -97,28 +97,69 @@ function App() {
       return null;
     };
 
-    const validationError = validateFile(file, activeTab);
-    if (validationError) {
-      setError(validationError);
-      logger.warn('File validation failed', { fileName: file.name, tab: activeTab });
+    // For archive tab, only allow single file
+    if (activeTab === 'archive') {
+      const file = files[0];
+      const validationError = validateFile(file, activeTab);
+      if (validationError) {
+        setError(validationError);
+        logger.warn('File validation failed', { fileName: file.name, tab: activeTab });
+        return;
+      }
+      setSelectedFiles([file]);
+      setError(null);
+      logger.info('File selected', { fileName: file.name, tab: activeTab });
       return;
     }
 
-    setSelectedFiles([file]);
-    setError(null);
-    logger.info('File selected', { fileName: file.name, tab: activeTab });
+    // For files tab, validate all files
+    const validFiles: File[] = [];
+    const errors: string[] = [];
+
+    for (const file of files) {
+      const validationError = validateFile(file, activeTab);
+      if (validationError) {
+        errors.push(validationError);
+      } else {
+        // Check for duplicates
+        const isDuplicate = selectedFiles.some(existing => 
+          existing.name === file.name && existing.size === file.size
+        );
+        if (!isDuplicate) {
+          validFiles.push(file);
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      setError(errors[0]); // Show first error
+      logger.warn('File validation failed', { errors, tab: activeTab });
+    } else {
+      setError(null);
+    }
+
+    if (validFiles.length > 0) {
+      setSelectedFiles(prev => [...prev, ...validFiles]);
+      logger.info('Files selected', { count: validFiles.length, tab: activeTab });
+    }
   };
 
   const handleProcessFiles = async () => {
     if (selectedFiles.length === 0) return;
 
-    const file = selectedFiles[0];
-    const isZip = file.type === 'application/zip' || file.name.toLowerCase().endsWith('.zip');
+    // Handle single ZIP file for archive tab
+    if (activeTab === 'archive') {
+      const file = selectedFiles[0];
+      const isZip = file.type === 'application/zip' || file.name.toLowerCase().endsWith('.zip');
+      if (isZip) {
+        await handleZipUpload(file);
+        return;
+      }
+    }
 
-    if (isZip && activeTab === 'archive') {
-      await handleZipUpload(file);
-    } else {
-      await handleFileUpload([file]);
+    // Handle multiple files for files tab
+    if (activeTab === 'files') {
+      await handleFileUpload(selectedFiles);
     }
   };
 
@@ -255,6 +296,7 @@ function App() {
             urlValue={urlInput}
             onUrlChange={setUrlInput}
             onProcessClick={handleProcessUrl}
+            selectedFiles={selectedFiles}
           />
 
           {/* Loading State */}

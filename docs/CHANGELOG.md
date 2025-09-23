@@ -2,6 +2,21 @@
 
 All notable changes to BrewChrome React will be documented in this file.
 
+## [1.1.1] - 2025-09-23
+
+### ✨ Enhanced User Experience
+- **Added** Multi-file upload support in Files tab
+- **Added** File list UI with individual file status and size display
+- **Added** Duplicate file detection and prevention
+- **Improved** File selection feedback with count display
+- **Enhanced** Drag & drop to accept multiple image files simultaneously
+
+### 🔧 Technical Improvements
+- **Updated** OriginalUploader component to handle multiple files
+- **Enhanced** File validation with better error messages
+- **Improved** Batch processing for multiple image files
+- **Maintained** Single file behavior for Archive tab (ZIP files)
+
 ## [1.1.0] - 2025-09-23
 
 ### 🔒 Security Hardening

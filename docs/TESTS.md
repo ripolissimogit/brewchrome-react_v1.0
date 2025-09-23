@@ -50,6 +50,25 @@
   - Jitter applied: delay * (0.8 to 1.3)
   - Max delay respected: Never exceeds 10s
 
+#### Multi-File Upload (Files Tab)
+- **Multiple File Selection**: ✅ PASSED
+  - File picker allows multiple selection
+  - Drag & drop accepts multiple files
+  - File list shows all selected files with status
+  - Count display updates correctly ("3 files selected")
+
+- **File Validation**: ✅ PASSED
+  - Invalid file types rejected with clear error messages
+  - Files over 30MB rejected before upload
+  - Duplicate files detected and prevented
+  - Mixed valid/invalid files handled gracefully
+
+- **Batch Processing**: ✅ PASSED
+  - Multiple images processed simultaneously
+  - Individual file progress tracking
+  - Error handling per file without breaking batch
+  - Successful files added to results gallery
+
 ### 🎯 Functional Tests
 
 #### Image Processing

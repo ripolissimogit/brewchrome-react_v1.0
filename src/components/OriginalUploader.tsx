@@ -5,7 +5,7 @@ import type { TabType } from '../types';
 
 interface OriginalUploaderProps {
   activeTab: TabType;
-  onFileSelect: (file: File) => void;
+  onFileSelect: (files: File[]) => void;
   onProcessFiles: () => void;
   onClearFiles: () => void;
   isLoading: boolean;
@@ -13,6 +13,7 @@ interface OriginalUploaderProps {
   urlValue?: string;
   onUrlChange?: (url: string) => void;
   onProcessClick?: () => void;
+  selectedFiles: File[];
 }
 
 export const OriginalUploader: React.FC<OriginalUploaderProps> = ({
@@ -25,11 +26,12 @@ export const OriginalUploader: React.FC<OriginalUploaderProps> = ({
   urlValue = '',
   onUrlChange,
   onProcessClick,
+  selectedFiles,
 }) => {
   const onDrop = useCallback(
     (acceptedFiles: File[]) => {
       if (acceptedFiles.length > 0) {
-        onFileSelect(acceptedFiles[0]);
+        onFileSelect(acceptedFiles);
       }
     },
     [onFileSelect]
@@ -139,11 +141,32 @@ export const OriginalUploader: React.FC<OriginalUploaderProps> = ({
           </div>
           <div className="text-center mt-2">
             <p className="text-xs text-gray-500">
-              {hasFiles ? 'file selected' : 'no file selected'}
+              {selectedFiles.length > 0 
+                ? `${selectedFiles.length} file${selectedFiles.length > 1 ? 's' : ''} selected`
+                : 'no files selected'
+              }
             </p>
           </div>
         </div>
       </div>
+
+      {/* File List */}
+      {activeTab === 'files' && selectedFiles.length > 0 && (
+        <div className="space-y-2">
+          <h3 className="text-sm font-medium text-gray-700">Selected Files:</h3>
+          <div className="space-y-1">
+            {selectedFiles.map((file, index) => (
+              <div key={`${file.name}-${index}`} className="flex items-center justify-between p-2 bg-gray-50 rounded text-sm">
+                <div className="flex items-center gap-2">
+                  <span className="text-gray-700">{file.name}</span>
+                  <span className="text-gray-500">({(file.size / 1024 / 1024).toFixed(1)} MB)</span>
+                </div>
+                <span className="text-xs text-gray-500 bg-gray-200 px-2 py-1 rounded">queued</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* File Formats */}
       <div className="text-center">
