@@ -38,7 +38,7 @@ def process_image(image_data):
         if not result.get("success"):
             return {"success": False, "error": result.get("error", "Unknown error")}
 
-        # Simplified response - no social image for React app
+        # Normalized palette for React app
         normalized_palette = []
         for c in result.get("palette", []):
             if isinstance(c, dict) and "rgb" in c:
@@ -49,12 +49,13 @@ def process_image(image_data):
         return {
             "success": True,
             "palette": normalized_palette,
+            "social_image": result.get("social_image"),  # Include social image
         }
     except Exception as e:
         return {"success": False, "error": f"Image processing failed: {str(e)}"}
 
 def process_zip_file(zip_data):
-    """Process ZIP file containing images - simplified for React"""
+    """Process ZIP file containing images - return detailed results with social images"""
     try:
         if not zip_data:
             return {"success": False, "error": "No ZIP data provided"}
@@ -72,44 +73,48 @@ def process_zip_file(zip_data):
         # Validate ZIP file
         if len(zip_bytes) < 22:
             return {"success": False, "error": "Invalid ZIP file: too small"}
-        if len(zip_bytes) > 100 * 1024 * 1024:  # Reduced to 100MB for React
-            return {"success": False, "error": "ZIP too large: exceeds 100MB limit"}
+        if len(zip_bytes) > 500 * 1024 * 1024:  # 500MB limit
+            return {"success": False, "error": "ZIP too large: exceeds 500MB limit"}
 
         results = []
         processed_count = 0
 
         try:
             with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zip_file:
-                image_files = [
-                    f for f in zip_file.namelist()
-                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
-                ]
+                # Filter image files and validate paths
+                image_files = []
+                for file_name in zip_file.namelist():
+                    # Path traversal protection
+                    if ".." in file_name or file_name.startswith("/") or "\\" in file_name:
+                        continue
+                    if file_name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                        image_files.append(file_name)
 
-                if len(image_files) > 50:  # Limit for React app
+                if len(image_files) > 50:  # Limit images per ZIP
                     return {"success": False, "error": "Too many images: max 50 per ZIP"}
+
+                if len(image_files) == 0:
+                    return {"success": False, "error": "No valid images found in ZIP"}
 
                 for file_name in image_files:
                     try:
                         with zip_file.open(file_name) as image_file:
                             image_data = image_file.read()
-                            image_base64 = base64.b64encode(image_data).decode("utf-8")
+                            
+                        # Process with full PaletteEngine (includes social image generation)
+                        result = ENGINE.process_image_data(image_data)
 
-                        # Determine format
-                        lower = file_name.lower()
-                        if lower.endswith((".jpg", ".jpeg")):
-                            image_format = "jpeg"
-                        elif lower.endswith(".png"):
-                            image_format = "png"
-                        elif lower.endswith(".webp"):
-                            image_format = "webp"
+                        if result.get("success"):
+                            # Normalize palette format
+                            normalized_palette = []
+                            for c in result.get("raw_palette", []):
+                                if isinstance(c, (list, tuple)) and len(c) == 3:
+                                    normalized_palette.append(list(c))
 
-                        # Process the image
-                        result = process_image(f"data:image/{image_format};base64,{image_base64}")
-
-                        if result["success"]:
                             results.append({
-                                "name": file_name,
-                                "palette": result["palette"],
+                                "filename": file_name,
+                                "palette": normalized_palette,
+                                "social_image": result.get("social_image")  # Can be None for fallback
                             })
                             processed_count += 1
 
@@ -125,10 +130,10 @@ def process_zip_file(zip_data):
         if processed_count == 0:
             return {"success": False, "error": "No images could be processed from ZIP"}
 
-        # Simplified response for React
+        # Return detailed results with backward compatibility
         return {
             "success": True,
-            "palette": results[0]["palette"] if results else [],  # Return first image palette
+            "results": results,
             "processed_count": processed_count,
             "total_files": len(image_files),
         }
