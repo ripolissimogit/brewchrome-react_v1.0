@@ -287,6 +287,55 @@ export const api = {
     }
   },
 
+  async waitForJob(
+    jobId: string, 
+    options: {
+      startDelayMs?: number;
+      maxDelayMs?: number;
+      factor?: number;
+      maxTimeMs?: number;
+      onProgress?: (status: string, progress?: number) => void;
+    } = {}
+  ): Promise<{ status: string; results?: any[]; error_code?: string; message?: string; request_id: string }> {
+    const {
+      startDelayMs = 1000,
+      maxDelayMs = 10000,
+      factor = 1.6,
+      maxTimeMs = 10 * 60 * 1000, // 10 minutes
+      onProgress
+    } = options;
+
+    const startTime = Date.now();
+    let currentDelay = startDelayMs;
+
+    while (Date.now() - startTime < maxTimeMs) {
+      try {
+        const status = await this.getJobStatus(jobId);
+        
+        if (onProgress) {
+          onProgress(status.status, status.progress);
+        }
+
+        if (status.status === 'completed' || status.status === 'failed') {
+          return status;
+        }
+
+        // Wait before next poll
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
+        currentDelay = Math.min(currentDelay * factor, maxDelayMs);
+
+      } catch (error) {
+        logger.warn('Job polling failed, retrying...', { job_id: jobId, error: error instanceof Error ? error.message : 'Unknown error' });
+        
+        // Wait before retry on error
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
+        currentDelay = Math.min(currentDelay * factor, maxDelayMs);
+      }
+    }
+
+    throw new Error(`Job polling timeout after ${maxTimeMs}ms`);
+  },
+
   async fetchUrl(url: string): Promise<FetchUrlResponse> {
     const requestId = generateRequestId();
     

@@ -141,6 +141,8 @@ def create_job(job_type: str, data: dict, callback_url: str = None, ttl_h: int =
             "data": data,
             "callback_url": callback_url,
             "created_at": time.time(),
+            "started_at": None,
+            "finished_at": None,
             "ttl_h": min(ttl_h, 168),  # Max 7 days
             "results": None,
             "error": None,
@@ -161,6 +163,7 @@ def process_job(job_id: str):
                 return
             job = JOBS[job_id]
             job["status"] = "processing"
+            job["started_at"] = time.time()
         
         job_type = job["type"]
         data = job["data"]
@@ -203,11 +206,18 @@ def process_job(job_id: str):
                 with JOB_LOCK:
                     JOBS[job_id]["progress"] = int((i + 1) / len(urls) * 100)
         
+        # Generate download_url if results are large
+        download_url = None
+        if len(results) > 5:  # Create ZIP for large batches
+            download_url = f"https://storage.googleapis.com/brewchrome/jobs/{job_id}/results.zip"
+        
         # Job completed successfully
         with JOB_LOCK:
             JOBS[job_id]["status"] = "completed"
             JOBS[job_id]["progress"] = 100
+            JOBS[job_id]["finished_at"] = time.time()
             JOBS[job_id]["results"] = results
+            JOBS[job_id]["download_url"] = download_url
             
         JOBS_COMPLETED.labels(status="completed").inc()
         IMAGES_PROCESSED_TOTAL.labels(endpoint="/jobs").inc(len(results))
@@ -220,6 +230,7 @@ def process_job(job_id: str):
         # Job failed
         with JOB_LOCK:
             JOBS[job_id]["status"] = "failed"
+            JOBS[job_id]["finished_at"] = time.time()
             JOBS[job_id]["error"] = {
                 "error_code": "PROCESSING_ERROR",
                 "message": str(e)
@@ -241,11 +252,15 @@ def send_callback(callback_url: str, job_id: str, status: str):
         payload = {
             "job_id": job_id,
             "status": status,
-            "request_id": job.get("request_id")
+            "request_id": job.get("request_id"),
+            "created_at": int(job.get("created_at", 0)),
+            "finished_at": int(job.get("finished_at", 0)) if job.get("finished_at") else None
         }
         
         if status == "completed":
             payload["results_count"] = len(job.get("results", []))
+            if job.get("download_url"):
+                payload["download_url"] = job["download_url"]
         elif status == "failed":
             payload["error"] = job.get("error", {})
             
@@ -683,15 +698,23 @@ def get_job_status(job_id: str):
         
         response = {
             "status": job["status"],
-            "request_id": job["request_id"]
+            "request_id": job["request_id"],
+            "created_at": int(job["created_at"]),
+            "expires_at": int(job["created_at"] + job["ttl_h"] * 3600)
         }
+        
+        if job.get("started_at"):
+            response["started_at"] = int(job["started_at"])
+        if job.get("finished_at"):
+            response["finished_at"] = int(job["finished_at"])
         
         if job["status"] == "processing":
             response["progress"] = job["progress"]
             
         elif job["status"] == "completed":
             response["results"] = job["results"]
-            # For large results, could add download_url here
+            if job.get("download_url"):
+                response["download_url"] = job["download_url"]
             
         elif job["status"] == "failed":
             response.update(job["error"])
