@@ -41,15 +41,20 @@ function App() {
     try {
       const results = await Promise.all(
         files.map(async (file) => {
-          // Convert file to data URL for fallback
-          const originalImageDataUrl = await new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          });
-
           const result = await api.processImage(file);
+          
+          // Fallback to original image only if backend doesn't provide social_image
+          let socialImage = result.social_image;
+          if (!socialImage) {
+            const originalImageDataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result as string);
+              reader.onerror = reject;
+              reader.readAsDataURL(file);
+            });
+            socialImage = originalImageDataUrl;
+          }
+
           return {
             id: `${Date.now()}-${Math.random()}`,
             filename: file.name,
@@ -57,7 +62,7 @@ function App() {
             extension: file.name.split('.').pop() || '',
             tab: 'files' as const,
             palette: result.palette || [],
-            socialImage: result.social_image || originalImageDataUrl,
+            socialImage,
           } as ProcessedImage;
         })
       );
@@ -155,7 +160,7 @@ function App() {
         extension: (fetchResult.content_type?.split('/')[1] || 'jpg') as string,
         tab: 'urls',
         palette: processResult.palette || [],
-        socialImage: processResult.social_image || fetchResult.image || '',
+        socialImage: processResult.social_image || fetchResult.image, // Fallback to original
       };
 
       setImages((prev) => [...prev, processedImage]);

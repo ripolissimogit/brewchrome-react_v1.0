@@ -95,6 +95,59 @@ class EnhancedPaletteGenerator:
                     break
         return unique[:10]
 
+    def create_social_image(self, image: Image.Image, palette: list) -> str:
+        """Create 1080x720 social image with palette overlay"""
+        try:
+            # Target dimensions
+            target_width, target_height = 1080, 720
+            
+            # Smart crop to 3:2 ratio
+            cropped_image = self.smart_crop_3_2(image)
+            
+            # Resize to fit 75% of target width (810px)
+            main_width = int(target_width * 0.75)
+            main_height = int(main_width * cropped_image.height / cropped_image.width)
+            
+            # If height exceeds available space, scale by height instead
+            if main_height > target_height - 16:  # 8px borders top/bottom
+                main_height = target_height - 16
+                main_width = int(main_height * cropped_image.width / cropped_image.height)
+            
+            main_image = cropped_image.resize((main_width, main_height), Image.Resampling.LANCZOS)
+            
+            # Create social image canvas
+            social = Image.new('RGB', (target_width, target_height), (255, 255, 255))
+            
+            # Paste main image with 8px border
+            x_offset = 8
+            y_offset = (target_height - main_height) // 2
+            social.paste(main_image, (x_offset, y_offset))
+            
+            # Create palette strip (25% width = 270px)
+            palette_width = target_width - main_width - 24  # 8px borders + 8px gap
+            palette_height = target_height - 16  # 8px borders
+            
+            if palette_width > 0 and len(palette) > 0:
+                color_height = palette_height // len(palette)
+                
+                for i, color in enumerate(palette[:10]):
+                    color_rect = Image.new('RGB', (palette_width, color_height), color)
+                    palette_x = main_width + 16  # 8px border + 8px gap
+                    palette_y = 8 + (i * color_height)
+                    social.paste(color_rect, (palette_x, palette_y))
+            
+            # Convert to base64
+            buffer = BytesIO()
+            social.save(buffer, format='PNG', optimize=True)
+            buffer.seek(0)
+            
+            social_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+            return f"data:image/png;base64,{social_base64}"
+            
+        except Exception as e:
+            print(f"Social image generation failed: {e}")
+            return None
+
     def create_social_image(self, image: Image.Image, palette, target_size=(1080, 720), border_size=8):
         inner_width, inner_height = target_size
         available_height = inner_height - border_size
