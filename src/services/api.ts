@@ -6,7 +6,7 @@ import type {
 } from '../types';
 import { logger } from './logger';
 
-const API_BASE = '/api';
+const API_BASE = 'https://brewchrome-backend-736130833520.us-central1.run.app';
 
 export const api = {
   async health(): Promise<HealthResponse> {

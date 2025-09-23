@@ -4,7 +4,6 @@ flask-cors>=4.0.0
 Pillow>=10.0.0
 requests>=2.28.0
 colorthief>=0.2.1
+smartcrop>=0.4.1
 
-# Removed dependencies:
-# numpy>=1.24.0 (not needed for basic palette extraction)
-# smartcrop>=0.4.1 (cropping handled by React frontend)
+# Note: smartcrop needed for social image generation

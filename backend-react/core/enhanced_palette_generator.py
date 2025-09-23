@@ -13,40 +13,86 @@ class EnhancedPaletteGenerator:
         self.sc = smartcrop.SmartCrop()
 
     def smart_crop_3_2(self, image: Image.Image) -> Image.Image:
+        # Handle very small images
+        if image.width < 3 or image.height < 2:
+            return image
+            
         target_width = min(image.width, int(image.height * 3 / 2))
         target_height = int(target_width * 2 / 3)
-        result = self.sc.crop(image, target_width, target_height)
-        crop_box = (
-            result["top_crop"]["x"],
-            result["top_crop"]["y"],
-            result["top_crop"]["x"] + result["top_crop"]["width"],
-            result["top_crop"]["y"] + result["top_crop"]["height"],
-        )
-        return image.crop(crop_box)
+        
+        # Ensure minimum dimensions
+        if target_width < 1:
+            target_width = 1
+        if target_height < 1:
+            target_height = 1
+            
+        try:
+            result = self.sc.crop(image, target_width, target_height)
+            crop_box = (
+                result["top_crop"]["x"],
+                result["top_crop"]["y"],
+                result["top_crop"]["x"] + result["top_crop"]["width"],
+                result["top_crop"]["y"] + result["top_crop"]["height"],
+            )
+            return image.crop(crop_box)
+        except Exception:
+            # Fallback to original image if cropping fails
+            return image
 
     def extract_colors(self, image: Image.Image):
         img_bytes = BytesIO()
+        
+        # Convert RGBA to RGB if necessary
+        if image.mode in ('RGBA', 'LA', 'P'):
+            # Create white background
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            if image.mode == 'P':
+                image = image.convert('RGBA')
+            background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+            image = background
+        
         image.save(img_bytes, format="JPEG")
         img_bytes.seek(0)
         color_thief = ColorThief(img_bytes)
         try:
             palette = color_thief.get_palette(color_count=min(self.n_colors + 5, 20), quality=1)
         except Exception:
-            palette = color_thief.get_palette(color_count=self.n_colors, quality=1)
+            try:
+                palette = color_thief.get_palette(color_count=self.n_colors, quality=1)
+            except Exception:
+                # Fallback to basic colors if extraction fails
+                palette = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]
+        
         unique = []
         seen = set()
         for c in palette:
             if c not in seen:
                 seen.add(c)
                 unique.append(c)
+        
+        # Ensure we have at least some colors
+        if len(unique) == 0:
+            unique = [(128, 128, 128)]  # Default gray
+            seen.add((128, 128, 128))
+        
+        # Fill up to 10 colors with variations
         while len(unique) < 10:
-            base = unique[len(unique) % max(1, len(unique))]
+            if len(unique) == 0:
+                break
+            base_index = len(unique) % len(unique)  # Safe modulo
+            base = unique[base_index]
             variation = tuple(max(0, min(255, v + 10)) for v in base)
             if variation not in seen:
                 seen.add(variation)
                 unique.append(variation)
             else:
-                break
+                # Try a different variation
+                variation = tuple(max(0, min(255, v - 10)) for v in base)
+                if variation not in seen:
+                    seen.add(variation)
+                    unique.append(variation)
+                else:
+                    break
         return unique[:10]
 
     def create_social_image(self, image: Image.Image, palette, target_size=(1080, 720), border_size=8):
