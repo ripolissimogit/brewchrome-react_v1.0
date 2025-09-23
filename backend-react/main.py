@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, make_response
 import structlog
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from flask_cors import CORS
@@ -56,10 +56,29 @@ ERRORS_TOTAL = Counter("errors_total", "Errors total", ["endpoint", "error_code"
 JOBS_TOTAL = Counter("jobs_total", "Total jobs created", ["type"])
 JOBS_COMPLETED = Counter("jobs_completed_total", "Total jobs completed", ["status"])
 
+# Enhanced metrics for hardening
+JOBS_STATUS = Counter("jobs_status_total", "Jobs by status", ["status"])
+JOBS_QUEUE_LATENCY = Histogram("jobs_queue_latency_seconds", "Job queue latency", buckets=[1,5,10,30,60,120,300])
+JOBS_PROCESSING_DURATION = Histogram("jobs_processing_duration_seconds", "Job processing duration", buckets=[5,10,30,60,120,300,600])
+WEBHOOK_DELIVERY_LATENCY = Histogram("webhook_delivery_latency_seconds", "Webhook delivery latency", buckets=[0.1,0.5,1,2,5,10])
+WEBHOOK_FAILURES = Counter("webhook_failures_total", "Webhook delivery failures", ["reason"])
+IDEMPOTENCY_CONFLICTS = Counter("idempotency_conflicts_total", "Idempotency key conflicts")
+STATUS_POLL_304 = Counter("status_poll_304_total", "304 responses for status polling")
+RETRY_AFTER_OBSERVED = Counter("retry_after_seconds_observed_total", "Retry-After values sent", ["seconds"])
+
 # Job storage and worker
 JOBS = {}  # In-memory job storage
 JOB_LOCK = threading.Lock()
 EXECUTOR = ThreadPoolExecutor(max_workers=3, thread_name_prefix="job-worker")
+
+# Security: Nonce cache for replay protection (5 minutes TTL)
+NONCE_CACHE = {}  # {nonce: timestamp}
+NONCE_LOCK = threading.Lock()
+NONCE_TTL = 300  # 5 minutes
+
+# Idempotency cache
+IDEMPOTENCY_CACHE = {}  # {key: (job_id, body_hash)}
+IDEMPOTENCY_LOCK = threading.Lock()
 
 app = Flask(__name__)
 CORS(app)
@@ -72,6 +91,18 @@ def _before():
         rid = uuid.uuid4().hex[:8]
     g.request_id = rid
     g.endpoint_label = request.path
+    
+    # Clean expired nonces periodically
+    if time.time() % 60 < 1:  # Every ~60 seconds
+        cleanup_nonce_cache()
+    
+    # Security validation for sensitive endpoints
+    if request.path.startswith('/jobs') and request.method in ['POST', 'PUT', 'DELETE']:
+        # Skip signature validation for now - can be enabled with environment variable
+        if os.environ.get("REQUIRE_SIGNATURE") == "true":
+            valid, error_code, error_message = validate_request_signature(request)
+            if not valid:
+                return make_error(401, error_code, "Authentication failed", error_message)
     
     # bytes in
     try:
@@ -319,25 +350,108 @@ def fetch_url_internal(url: str) -> dict:
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+def cleanup_nonce_cache():
+    """Clean expired nonces"""
+    current_time = time.time()
+    with NONCE_LOCK:
+        expired = [nonce for nonce, timestamp in NONCE_CACHE.items() 
+                  if current_time - timestamp > NONCE_TTL]
+        for nonce in expired:
+            NONCE_CACHE.pop(nonce, None)
+
+def validate_request_signature(request):
+    """Validate HMAC signature for secure endpoints"""
+    timestamp_header = request.headers.get('X-Timestamp')
+    signature_header = request.headers.get('X-Signature')
+    
+    if not timestamp_header or not signature_header:
+        return False, "MISSING_SIGNATURE", "Missing authentication headers"
+    
+    try:
+        timestamp = int(timestamp_header)
+        current_time = int(time.time())
+        
+        # Check timestamp window (5 minutes)
+        if abs(current_time - timestamp) > 300:
+            return False, "TIMESTAMP_OUT_OF_RANGE", "Request timestamp outside valid window"
+        
+        # Check nonce reuse
+        nonce = request.headers.get('X-Request-Id', '')
+        with NONCE_LOCK:
+            if nonce in NONCE_CACHE:
+                return False, "NONCE_REUSED", "Request ID already used"
+            NONCE_CACHE[nonce] = current_time
+        
+        # Calculate expected signature
+        body = request.get_data()
+        body_hash = hashlib.sha256(body).hexdigest()
+        
+        message = f"{timestamp}\n{request.method}\n{request.path}\n{body_hash}"
+        
+        webhook_secret = os.environ.get("WEBHOOK_SECRET", "brewchrome-default-secret")
+        expected_signature = hmac.new(
+            webhook_secret.encode(),
+            message.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        
+        if not hmac.compare_digest(signature_header, f"sha256={expected_signature}"):
+            return False, "INVALID_SIGNATURE", "Signature verification failed"
+        
+        return True, None, None
+        
+    except (ValueError, TypeError):
+        return False, "INVALID_TIMESTAMP", "Invalid timestamp format"
+
+def check_idempotency(key: str, body_data: bytes) -> tuple:
+    """Check idempotency key and body hash"""
+    if not key:
+        return None, None
+    
+    body_hash = hashlib.sha256(body_data).hexdigest()
+    
+    with IDEMPOTENCY_LOCK:
+        if key in IDEMPOTENCY_CACHE:
+            cached_job_id, cached_hash = IDEMPOTENCY_CACHE[key]
+            if cached_hash != body_hash:
+                return None, "IDEMPOTENCY_VIOLATION"
+            return cached_job_id, None
+    
+    return None, None
+
+def store_idempotency(key: str, job_id: str, body_data: bytes):
+    """Store idempotency mapping"""
+    if not key:
+        return
+    
+    body_hash = hashlib.sha256(body_data).hexdigest()
+    with IDEMPOTENCY_LOCK:
+        IDEMPOTENCY_CACHE[key] = (job_id, body_hash)
+
 ENGINE = PaletteEngine()
 
-def make_error(status_code: int, error_code: str, message: str):
-    """Create standardized error response with metrics and logging"""
+def make_error(status_code: int, error_code: str, user_message: str, developer_message: str = None):
+    """Create standardized error response with enhanced taxonomy"""
     rid = getattr(g, "request_id", None) or uuid.uuid4().hex[:8]
     payload = {
-        "success": False,
         "error_code": error_code,
-        "message": message,
+        "user_message": user_message,
         "request_id": rid,
-        "ts": datetime.now(timezone.utc).isoformat()
+        "timestamp": int(time.time())
     }
     
     # Metrics
     endpoint = getattr(g, "endpoint_label", request.path)
     ERRORS_TOTAL.labels(endpoint=endpoint, error_code=error_code).inc()
     
-    # Log error
-    logger.error("http_error", request_id=rid, endpoint=endpoint, status_code=status_code, error_code=error_code, message=message)
+    # Log error with developer message
+    logger.error("http_error", 
+                request_id=rid, 
+                endpoint=endpoint, 
+                status_code=status_code, 
+                error_code=error_code, 
+                user_message=user_message,
+                developer_message=developer_message or user_message)
     
     resp = jsonify(payload)
     resp.status_code = status_code
@@ -637,19 +751,27 @@ def process_zip_endpoint():
 def create_job_endpoint():
     """Create async job for batch processing"""
     try:
+        # Get request body for idempotency check
+        body_data = request.get_data()
+        
         # Check for idempotency key
         idempotency_key = request.headers.get('Idempotency-Key')
         if idempotency_key:
-            # Check if job already exists with this key
-            with JOB_LOCK:
-                for job in JOBS.values():
-                    if job.get("idempotency_key") == idempotency_key:
-                        return jsonify({
-                            "job_id": job["id"],
-                            "status": job["status"],
-                            "eta_s": 60,  # Default ETA for existing job
-                            "request_id": job["request_id"]
-                        }), 202
+            existing_job_id, conflict = check_idempotency(idempotency_key, body_data)
+            if conflict == "IDEMPOTENCY_VIOLATION":
+                return make_error(409, "IDEMPOTENCY_VIOLATION", 
+                                "Same idempotency key with different request body",
+                                f"Key {idempotency_key} already used with different body")
+            if existing_job_id:
+                # Return existing job
+                with JOB_LOCK:
+                    job = JOBS.get(existing_job_id, {})
+                return jsonify({
+                    "job_id": existing_job_id,
+                    "status": job.get("status", "unknown"),
+                    "eta_s": 60,
+                    "request_id": job.get("request_id", "")
+                }), 202
         
         callback_url = None
         ttl_h = 24
@@ -666,7 +788,7 @@ def create_job_endpoint():
             file.seek(0)
             
             if file_size > 500 * 1024 * 1024:
-                return make_error(413, "PAYLOAD_TOO_LARGE", "ZIP exceeds 500MB limit")
+                return make_error(413, "PAYLOAD_TOO_LARGE", "File exceeds 500MB limit")
             
             file_data = file.read()
             zip_base64 = base64.b64encode(file_data).decode('utf-8')
@@ -703,6 +825,10 @@ def create_job_endpoint():
             else:
                 return make_error(400, "INVALID_INPUT", "Provide 'urls' array or 'zip' data")
         
+        # Store idempotency mapping
+        if idempotency_key:
+            store_idempotency(idempotency_key, job_id, body_data)
+        
         # Estimate ETA based on job type and size
         with JOB_LOCK:
             job = JOBS[job_id]
@@ -719,7 +845,7 @@ def create_job_endpoint():
         }), 202
         
     except Exception as e:
-        return make_error(500, "INTERNAL_ERROR", "Job creation failed")
+        return make_error(500, "INTERNAL_ERROR", "Job creation failed", str(e))
 
 @app.route("/jobs/<job_id>", methods=["GET"])
 def get_job_status(job_id: str):
@@ -731,18 +857,25 @@ def get_job_status(job_id: str):
         if not job:
             return make_error(404, "JOB_NOT_FOUND", "Job not found")
         
-        # Check TTL
-        if time.time() - job["created_at"] > job["ttl_h"] * 3600:
+        # Check TTL and mark as expired
+        current_time = time.time()
+        expires_at = job["created_at"] + job["ttl_h"] * 3600
+        
+        if current_time > expires_at:
+            # Mark as expired and clean up
             with JOB_LOCK:
-                JOBS.pop(job_id, None)
-            return make_error(410, "JOB_EXPIRED", "Job results expired")
+                if job_id in JOBS:
+                    JOBS[job_id]["status"] = "expired"
+                    JOBS[job_id]["results"] = None  # Clear results
+                    JOBS[job_id]["download_url"] = None
+            return make_error(404, "EXPIRED_JOB", "Job results have expired")
         
         response = {
             "job_id": job_id,
             "status": job["status"],
             "request_id": job["request_id"],
             "created_at": int(job["created_at"]),
-            "expires_at": int(job["created_at"] + job["ttl_h"] * 3600)
+            "expires_at": int(expires_at)
         }
         
         if job.get("started_at"):
@@ -758,35 +891,42 @@ def get_job_status(job_id: str):
             response["results_count"] = len(job["results"])
             if job.get("download_url"):
                 response["download_url"] = job["download_url"]
-                response["download_expires_at"] = int(time.time() + 3600)  # 1 hour
+                response["download_expires_at"] = int(current_time + 3600)  # 1 hour
             
         elif job["status"] == "failed":
             response.update(job["error"])
-            response["user_message"] = f"Elaborazione fallita: {job['error'].get('message', 'Errore sconosciuto')}"
+            response["user_message"] = f"Job failed: {job['error'].get('message', 'Unknown error')}"
+        
+        # Create ETag from complete response
+        response_json = json.dumps(response, sort_keys=True)
+        etag = hashlib.md5(response_json.encode()).hexdigest()[:8]
+        
+        # Check If-None-Match for 304
+        if request.headers.get('If-None-Match') == f'"{etag}"':
+            resp = make_response('', 304)
+            resp.headers['ETag'] = f'"{etag}"'
+            # Still provide Retry-After hint
+            if job["status"] == "queued":
+                resp.headers['Retry-After'] = '2'
+            elif job["status"] == "processing":
+                resp.headers['Retry-After'] = '5'
+            return resp
         
         # Create response with headers
         resp = jsonify(response)
-        
-        # ETag for caching
-        import hashlib
-        etag = hashlib.md5(json.dumps(response, sort_keys=True).encode()).hexdigest()[:8]
         resp.headers['ETag'] = f'"{etag}"'
         resp.headers['Cache-Control'] = 'no-store'
         
         # Retry-After hint based on status
         if job["status"] == "queued":
-            resp.headers['Retry-After'] = '2'  # 2 seconds for queued
+            resp.headers['Retry-After'] = '2'
         elif job["status"] == "processing":
-            resp.headers['Retry-After'] = '5'  # 5 seconds for processing
-        
-        # Check If-None-Match for 304
-        if request.headers.get('If-None-Match') == f'"{etag}"':
-            return '', 304
+            resp.headers['Retry-After'] = '5'
             
         return resp
         
     except Exception as e:
-        return make_error(500, "INTERNAL_ERROR", "Failed to get job status")
+        return make_error(500, "INTERNAL_ERROR", "Failed to get job status", str(e))
 
 @app.route("/metrics", methods=["GET"])
 def metrics():
