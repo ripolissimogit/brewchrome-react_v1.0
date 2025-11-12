@@ -21,7 +21,9 @@ class PaletteEngine:
                 new_size = (int(image.width * ratio), int(image.height * ratio))
                 image = image.resize(new_size, Image.Resampling.LANCZOS)
 
-            cropped_image = self.generator.smart_crop_3_2(image)
+            # DISABLED: smart_crop is too slow, using original image
+            # cropped_image = self.generator.smart_crop_3_2(image)
+            cropped_image = image  # Use original image directly
             palette = self.generator.extract_colors(cropped_image)
             social_img = self.generator.create_social_image(cropped_image, palette)
 
